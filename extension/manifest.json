@@ -10,7 +10,7 @@
   "host_permissions": [
     "https://agent.tapbit.com/*",
     "https://agent-api.tapbit.com/*",
-    "https://calc.coinstep.co.kr/*"
+    "https://pro.coinstep.co.kr/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -22,7 +22,7 @@
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://calc.coinstep.co.kr/*"],
+      "matches": ["https://pro.coinstep.co.kr/*"],
       "js": ["content-calc.js"],
       "run_at": "document_idle"
     }
