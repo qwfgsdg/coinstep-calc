@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 280px;
+      font-family: 'Segoe UI', -apple-system, sans-serif;
+      background: #0a0a12;
+      color: #cbd5e1;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #1e1e2e;
+    }
+    .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #34d399;
+      box-shadow: 0 0 8px #34d39944;
+    }
+    .dot.off { background: #6b7280; box-shadow: none; }
+    .title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #f1f5f9;
+    }
+    .version {
+      font-size: 9px;
+      color: #4b5563;
+      margin-left: auto;
+    }
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      font-size: 11px;
+      border-bottom: 1px solid #111118;
+    }
+    .status-label { color: #6b7280; }
+    .status-value { color: #94a3b8; font-weight: 500; }
+    .status-value.connected { color: #34d399; }
+    .status-value.disconnected { color: #f87171; }
+    .hint {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #0ea5e908;
+      border: 1px solid #0ea5e922;
+      font-size: 10px;
+      color: #94a3b8;
+      line-height: 1.6;
+    }
+    .sync-btn {
+      width: 100%;
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #34d39933;
+      background: #34d39910;
+      color: #34d399;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .sync-btn:hover { background: #34d39920; border-color: #34d39955; }
+    .sync-btn:disabled { opacity: 0.5; cursor: default; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="dot" id="dot"></div>
+    <span class="title">Coinstep Tapbit 동기화</span>
+    <span class="version">v1.0.0</span>
+  </div>
+
+  <div class="status-row">
+    <span class="status-label">Tapbit 탭</span>
+    <span class="status-value" id="tapbit-status">확인 중...</span>
+  </div>
+  <div class="status-row">
+    <span class="status-label">에이전트</span>
+    <span class="status-value" id="agent-name">—</span>
+  </div>
+  <div class="status-row">
+    <span class="status-label">Auth 토큰</span>
+    <span class="status-value" id="auth-status">—</span>
+  </div>
+
+  <div class="hint" id="hint">
+    Tapbit 관리자 페이지(agent.tapbit.com)에 로그인하면 자동으로 연결됩니다.
+  </div>
+
+  <button class="sync-btn" id="sync-btn" disabled>
+    📥 계산기에서 불러오기 사용 가능
+  </button>
+
+  <script src="popup.js"></script>
+</body>
+</html>
