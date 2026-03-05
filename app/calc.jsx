@@ -197,12 +197,26 @@ export default function SimV4() {
   }, [parsedUsers, selectedUserId]);
 
   // ── Tapbit 동기화 수신 (chrome.storage → content-calc.js → 여기) ──
+  const [syncMsg, setSyncMsg] = useState(null);
   useEffect(() => {
     const onSync = (e) => {
       const data = e.detail;
-      if (!data?.success) return;
-      setTapbitData({ positions: data.positions || [], accounts: data.accounts || [], profile: data.profile });
-      setLastSyncTime(data.lastSync || Date.now());
+      if (!data) return;
+      if (data.error) {
+        setSyncMsg(data.message || "동기화 실패");
+        return;
+      }
+      if (data.success) {
+        const posCount = data.positions?.length || 0;
+        const accCount = data.accounts?.length || 0;
+        setTapbitData({ positions: data.positions || [], accounts: data.accounts || [], profile: data.profile });
+        setLastSyncTime(data.lastSync || Date.now());
+        if (posCount === 0) {
+          setSyncMsg(`데이터 수신됨 (포지션 ${posCount}, 잔고 ${accCount}) — 확장에서 동기화를 다시 실행해보세요`);
+        } else {
+          setSyncMsg(null);
+        }
+      }
     };
     window.addEventListener("tapbit-sync-response", onSync);
 
@@ -2195,14 +2209,47 @@ export default function SimV4() {
                 <div style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0", marginBottom: 8, fontFamily: "'DM Sans'" }}>
                   Tapbit 동기화 대기 중
                 </div>
-                <div style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.8, fontFamily: "'DM Sans'" }}>
-                  크롬 확장에서 <strong style={{ color: "#34d399" }}>🔄 동기화</strong>를 실행하면<br />
-                  유저 포지션이 자동으로 표시됩니다
+                <div style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.8, fontFamily: "'DM Sans'", marginBottom: 16 }}>
+                  확장에서 동기화 완료 후 아래 버튼을 눌러주세요
                 </div>
+                <button
+                  onClick={() => window.postMessage({ type: "CALC_READ_DATA" }, "*")}
+                  style={{
+                    padding: "12px 32px", fontSize: 14, fontWeight: 700, borderRadius: 10,
+                    border: "1px solid #34d39944", background: "#34d39915",
+                    color: "#34d399", cursor: "pointer", fontFamily: "'DM Sans'",
+                    transition: "all 0.15s", letterSpacing: 0.5,
+                  }}
+                  onMouseEnter={(e) => { e.target.style.background = "#34d39925"; e.target.style.borderColor = "#34d39966"; }}
+                  onMouseLeave={(e) => { e.target.style.background = "#34d39915"; e.target.style.borderColor = "#34d39944"; }}
+                >
+                  📥 Tapbit 데이터 불러오기
+                </button>
+                <div style={{ fontSize: 10, color: "#4b5563", marginTop: 12, fontFamily: "'DM Sans'" }}>
+                  확장 팝업에서 먼저 🔄 동기화를 실행하세요
+                </div>
+                {syncMsg && (
+                  <div style={{
+                    marginTop: 12, padding: "8px 12px", borderRadius: 8,
+                    background: "#f59e0b08", border: "1px solid #f59e0b22",
+                    fontSize: 11, color: "#f59e0b", fontFamily: "'DM Sans'", textAlign: "left",
+                  }}>
+                    ⚠ {syncMsg}
+                  </div>
+                )}
               </div>
             ) : (
               <>
-                <Sec label={`유저 목록 (${parsedUsers.length}명)`} />
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <Sec label={`유저 목록 (${parsedUsers.length}명)`} />
+                  <button
+                    onClick={() => window.postMessage({ type: "CALC_READ_DATA" }, "*")}
+                    style={{
+                      ...S.miniBtn, fontSize: 10, padding: "5px 12px",
+                      color: "#34d399", borderColor: "#34d39933",
+                    }}
+                  >🔄 새로고침</button>
+                </div>
                 {parsedUsers.map(user => {
                   const totalPnL = user.positions.reduce((a, p) => a + Number(p.unrealisedPnl || 0), 0);
                   const totalMargin = user.positions.reduce((a, p) => a + Number(p.margin || 0), 0);
