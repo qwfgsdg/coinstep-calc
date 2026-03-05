@@ -776,13 +776,13 @@ export default function SimV4() {
     setSyncLoading(true);
     setSyncError(null);
     window.postMessage({ type: "CALC_SYNC_REQUEST" }, "*");
-    // 3초 타임아웃
+    // 20초 타임아웃 (탭 열기 + 데이터 수집 시간)
     setTimeout(() => {
       setSyncLoading(prev => {
-        if (prev) setSyncError("응답 없음 — Tapbit 관리자 페이지가 열려있는지 확인하세요");
+        if (prev) setSyncError("응답 없음 — 확장 팝업에서 먼저 동기화를 실행하세요");
         return false;
       });
-    }, 5000);
+    }, 20000);
   }, []);
 
   // 유저 선택 → 데이터 적용
