@@ -205,9 +205,16 @@ export default function SimV4() {
       setLastSyncTime(data.lastSync || Date.now());
     };
     window.addEventListener("tapbit-sync-response", onSync);
-    // 확장에 데이터 요청
-    window.postMessage({ type: "CALC_CHECK_STATUS" }, "*");
-    return () => window.removeEventListener("tapbit-sync-response", onSync);
+
+    // 마운트 후 데이터 요청 (content-calc.js가 storage에서 읽어서 전달)
+    const t1 = setTimeout(() => window.postMessage({ type: "CALC_READ_DATA" }, "*"), 500);
+    const t2 = setTimeout(() => window.postMessage({ type: "CALC_READ_DATA" }, "*"), 2000);
+    const t3 = setTimeout(() => window.postMessage({ type: "CALC_READ_DATA" }, "*"), 5000);
+
+    return () => {
+      window.removeEventListener("tapbit-sync-response", onSync);
+      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
+    };
   }, []);
 
   // ── Tapbit WebSocket 가격 엔진 (항상 연결) ──
