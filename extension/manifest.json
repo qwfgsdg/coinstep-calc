@@ -19,7 +19,7 @@
     {
       "matches": ["https://agent.tapbit.com/*"],
       "js": ["content-tapbit.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     },
     {
       "matches": ["https://pro.coinstep.co.kr/*"],
