@@ -4263,7 +4263,7 @@ export default function SimV4() {
 
         </>)}
 
-          </>  {/* selectedUser && <> */}
+          </>
         )}
       </div>
     </div>
