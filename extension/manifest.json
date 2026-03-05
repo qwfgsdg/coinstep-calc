@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Coinstep Tapbit 동기화",
   "description": "Tapbit 관리자 포지션을 Coinstep 계산기로 자동 동기화",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "permissions": [
     "storage",
     "tabs"
