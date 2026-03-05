@@ -10,11 +10,43 @@
 (function() {
   "use strict";
 
-  // ── inject-tapbit.js를 페이지 컨텍스트에 삽입 ──
+  // ── fetch 래핑 코드를 인라인으로 즉시 삽입 (동기 실행, Tapbit JS보다 먼저) ──
+  const injectCode = `(function(){
+    const _origFetch = window.fetch;
+    window.fetch = async function(...args) {
+      const result = await _origFetch.apply(this, args);
+      try {
+        const url = typeof args[0]==="string" ? args[0] : (args[0]?.url||"");
+        if (!url.includes("agent-api.tapbit.com")) return result;
+        const am = url.match(/auth=([^&]+)/);
+        if (am) window.postMessage({type:"__TAPBIT_AUTH__",auth:am[1]},"*");
+        if (url.includes("/agent/contract/positions") && url.includes("contractType=")) {
+          try { const c=result.clone(); const d=await c.json();
+            console.log("[Coinstep] Positions intercepted, list:",d?.data?.list?.length);
+            if(d?.data?.list) window.postMessage({type:"__TAPBIT_POSITIONS__",data:d.data},"*");
+          } catch(e){ console.log("[Coinstep] Pos parse err:",e.message); }
+        }
+        if (url.includes("/agent/accounts") && url.includes("contractType=")) {
+          try { const c=result.clone(); const d=await c.json();
+            console.log("[Coinstep] Accounts intercepted, list:",d?.data?.list?.length);
+            if(d?.data?.list) window.postMessage({type:"__TAPBIT_ACCOUNTS__",data:d.data},"*");
+          } catch(e){ console.log("[Coinstep] Acc parse err:",e.message); }
+        }
+        if (url.includes("/agent/profile")) {
+          try { const c=result.clone(); const d=await c.json();
+            if(d?.data?.maskId) window.postMessage({type:"__TAPBIT_PROFILE__",profile:{maskId:d.data.maskId,remarkName:d.data.remarkName||""}},"*");
+          } catch(e){}
+        }
+      } catch(e){}
+      return result;
+    };
+    console.log("[Coinstep] Tapbit fetch monitor active (inline)");
+  })();`;
+
   const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("inject-tapbit.js");
-  script.onload = () => script.remove();
+  script.textContent = injectCode;
   (document.head || document.documentElement).appendChild(script);
+  script.remove();
 
   // ── inject에서 보내는 메시지를 background로 중계 ──
   window.addEventListener("message", (e) => {
@@ -77,8 +109,14 @@
     }
   });
 
-  // ── 로드 완료 알림 ──
-  chrome.runtime.sendMessage({ type: "TAB_LOADED", url: window.location.href }).catch(() => {});
-
-  console.log("[Coinstep] Tapbit content script loaded");
+  // ── 로드 완료 알림 (페이지 로드 후) ──
+  const notifyLoaded = () => {
+    chrome.runtime.sendMessage({ type: "TAB_LOADED", url: window.location.href }).catch(() => {});
+    console.log("[Coinstep] Tapbit content script loaded");
+  };
+  if (document.readyState === "complete" || document.readyState === "interactive") {
+    notifyLoaded();
+  } else {
+    document.addEventListener("DOMContentLoaded", notifyLoaded, { once: true });
+  }
 })();
