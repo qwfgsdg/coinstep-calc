@@ -68,17 +68,8 @@ export default function SimV4() {
   const setLiqPrice = (coin, val) => setCoinLiqPrices(prev => ({ ...prev, [coin]: val }));
   const getLiqPrice = (coin) => n(coinLiqPrices[coin] || "");
 
-  // ── 실시간 가격 (Tapbit WebSocket) ──
-  const [priceSource, setPriceSource] = useState("connecting");
-  const [coinFundingRates, setCoinFundingRates] = useState({});
-  const priceBufferRef = useRef({});
-  const wsRef = useRef(null);
-  const reconnectRef = useRef(0);
-  const flushTimerRef = useRef(null);
-  const priceDirTimer = useRef(null);
-
-  const priceSourceLabel = { "tapbit-ws": "Tapbit 실시간", "reconnecting": "재연결 중...", "binance-rest": "Binance 대체", "disconnected": "연결 안 됨" }[priceSource] || "";
-  const priceSourceColor = { "tapbit-ws": "#34d399", "reconnecting": "#f59e0b", "binance-rest": "#0ea5e9", "disconnected": "#6b7280" }[priceSource] || "#6b7280";
+  // ── 실시간 가격 (Binance REST) ──
+  const [priceConnected, setPriceConnected] = useState(false);
 
   // ── 시뮬레이션 State (전부 유지) ──
   const [selId, setSelId] = useState(null);
@@ -231,108 +222,51 @@ export default function SimV4() {
     };
   }, []);
 
-  // ── Tapbit WebSocket 가격 엔진 (항상 연결) ──
+  // ── 실시간 가격 (Binance REST 3초 폴링) ──
   useEffect(() => {
-    const binanceIntervalRef = { current: null };
-    let binanceController = null;
+    if (usedCoins.length === 0) return;
+    let timer = null;
+    const controller = new AbortController();
 
-    const startBinanceFallback = () => {
-      setPriceSource("binance-rest");
-      const controller = new AbortController();
-      const fetchPrices = async () => {
-        try {
-          const coins = usedCoins.length > 0 ? usedCoins : ["BTC", "ETH"];
-          const results = await Promise.all(
-            coins.map(coin =>
-              fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${coin}USDT`, { signal: controller.signal })
-                .then(r => r.json()).then(d => ({ coin, price: String(parseFloat(d.price)) }))
-            )
-          );
-          setCoinPrices(prev => {
-            const next = { ...prev }; let changed = false;
-            results.forEach(({ coin, price }) => { if (next[coin] !== price) { next[coin] = price; changed = true; } });
-            return changed ? next : prev;
-          });
-        } catch (e) { if (e.name === "AbortError") return; }
-      };
-      const scheduleNext = () => {
-        const ms = document.hidden ? 10000 : 3000;
-        clearTimeout(binanceIntervalRef.current);
-        binanceIntervalRef.current = setTimeout(async () => { await fetchPrices(); scheduleNext(); }, ms);
-      };
-      fetchPrices().then(scheduleNext);
-      return controller;
-    };
-
-    const connectTapbitWS = () => {
+    const fetchPrices = async () => {
       try {
-        const ws = new WebSocket("wss://ws-openapi.tapbit.com/stream/ws");
-        wsRef.current = ws;
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ op: "subscribe", args: ["usdt/ticker.all"] }));
-          setPriceSource("tapbit-ws");
-          reconnectRef.current = 0;
-          if (binanceController) { binanceController.abort(); binanceController = null; }
-          clearTimeout(binanceIntervalRef.current);
-        };
-        ws.onmessage = (e) => {
-          try {
-            const msg = JSON.parse(e.data);
-            if (!msg.data || !Array.isArray(msg.data)) return;
-            msg.data.forEach(t => {
-              const coin = (t.symbol || "").replace("-SWAP", "");
-              if (!coin) return;
-              priceBufferRef.current[coin] = { mark: t.markPrice || t.lastPrice, funding: t.fundingRate };
-            });
-          } catch (err) {}
-        };
-        ws.onclose = () => {
-          reconnectRef.current++;
-          if (reconnectRef.current <= 5) {
-            setPriceSource("reconnecting");
-            setTimeout(connectTapbitWS, Math.min(1000 * Math.pow(2, reconnectRef.current), 30000));
-          } else { binanceController = startBinanceFallback(); }
-        };
-        ws.onerror = () => { if (ws.readyState !== WebSocket.CLOSED) ws.close(); };
-      } catch (err) { binanceController = startBinanceFallback(); }
+        const results = await Promise.all(
+          usedCoins.map(coin =>
+            fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${coin}USDT`, { signal: controller.signal })
+              .then(r => r.json())
+              .then(d => ({ coin, price: String(parseFloat(d.price)) }))
+          )
+        );
+        setCoinPrices(prev => {
+          const next = { ...prev };
+          let changed = false;
+          results.forEach(({ coin, price }) => {
+            if (next[coin] !== price) { next[coin] = price; changed = true; }
+          });
+          return changed ? next : prev;
+        });
+        setPriceConnected(true);
+      } catch (e) {
+        if (e.name !== "AbortError") setPriceConnected(false);
+      }
     };
 
-    connectTapbitWS();
-
-    flushTimerRef.current = setInterval(() => {
-      const buf = priceBufferRef.current;
-      const coins = Object.keys(buf);
-      if (coins.length === 0) return;
-      setCoinPrices(prev => {
-        const next = { ...prev }; let changed = false;
-        coins.forEach(coin => { const val = buf[coin].mark; if (val && next[coin] !== val) { next[coin] = val; changed = true; } });
-        return changed ? next : prev;
-      });
-      setCoinFundingRates(prev => {
-        const next = { ...prev }; let changed = false;
-        coins.forEach(coin => { if (buf[coin].funding && next[coin] !== buf[coin].funding) { next[coin] = buf[coin].funding; changed = true; } });
-        return changed ? next : prev;
-      });
-      priceBufferRef.current = {};
-    }, 500);
+    fetchPrices();
+    timer = setInterval(fetchPrices, document.hidden ? 10000 : 3000);
 
     const onVis = () => {
-      if (!document.hidden && priceSource !== "tapbit-ws") {
-        reconnectRef.current = 0;
-        if (wsRef.current) wsRef.current.close();
-        connectTapbitWS();
-      }
+      clearInterval(timer);
+      timer = setInterval(fetchPrices, document.hidden ? 10000 : 3000);
+      if (!document.hidden) fetchPrices();
     };
     document.addEventListener("visibilitychange", onVis);
 
     return () => {
-      if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
-      if (binanceController) binanceController.abort();
-      clearInterval(flushTimerRef.current);
-      clearTimeout(binanceIntervalRef.current);
+      controller.abort();
+      clearInterval(timer);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, []);
+  }, [usedCoins.join(",")]);
 
   // ── 헷지 진입가 실시간 연동 ──
   useEffect(() => {
@@ -2172,7 +2106,7 @@ export default function SimV4() {
         {/* HEADER */}
         <header style={S.hdr}>
           <div style={S.hdrRow}>
-            <div style={{ ...S.hdrDot, background: priceSourceColor, boxShadow: `0 0 8px ${priceSourceColor}44` }} />
+            <div style={{ ...S.hdrDot, background: priceConnected ? "#34d399" : "#6b7280", boxShadow: priceConnected ? "0 0 8px #34d39944" : "none" }} />
             <span style={S.hdrBadge}>TAPBIT SYNC · CROSS MARGIN</span>
           </div>
           <h1 style={S.hdrTitle}>COINSTEP PRO</h1>
@@ -2180,19 +2114,22 @@ export default function SimV4() {
             <div style={{ fontSize: 10, color: "#4b5563", fontFamily: "'DM Sans'", display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{
                 display: "inline-block", width: 5, height: 5, borderRadius: "50%",
-                background: priceSourceColor,
-                animation: priceSource === "reconnecting" ? "pulse 1s infinite" : "none",
+                background: priceConnected ? "#34d399" : "#6b7280",
               }} />
-              <span style={{ color: priceSourceColor }}>{priceSourceLabel}</span>
+              <span style={{ color: priceConnected ? "#34d399" : "#6b7280" }}>
+                {priceConnected ? "실시간" : hasAnyPrice ? "실시간" : "가격 대기"}
+              </span>
               {lastSyncTime && (
-                <span style={{ color: "#334155" }}>· 동기화 {Math.floor((Date.now() - lastSyncTime) / 1000)}초 전</span>
+                <span style={{ color: "#334155" }}>
+                  · {(() => {
+                    const sec = Math.floor((Date.now() - lastSyncTime) / 1000);
+                    if (sec < 60) return `동기화 ${sec}초 전`;
+                    if (sec < 300) return `동기화 ${Math.floor(sec / 60)}분 전`;
+                    return "동기화됨";
+                  })()}
+                </span>
               )}
             </div>
-            {tapbitData?.profile?.remarkName && (
-              <span style={{ fontSize: 10, color: "#34d399", fontFamily: "'DM Sans'" }}>
-                {tapbitData.profile.remarkName}
-              </span>
-            )}
           </div>
         </header>
 
@@ -2311,11 +2248,6 @@ export default function SimV4() {
                 </div>
                 <div style={{ fontSize: 10, color: "#4b5563", fontFamily: "'DM Sans'" }}>
                   잔고 {fmt(Number(selectedUser.wallet), 0)} USDT · 포지션 {selectedUser.positions.length}개
-                  {usedCoins.length > 0 && coinFundingRates[usedCoins[0]] && (
-                    <span style={{ marginLeft: 8, color: Number(coinFundingRates[usedCoins[0]]) >= 0 ? "#34d399" : "#f87171" }}>
-                      {usedCoins[0]} 펀딩 {(Number(coinFundingRates[usedCoins[0]]) * 100).toFixed(4)}%
-                    </span>
-                  )}
                 </div>
               </div>
               {/* 현재가 표시 */}
@@ -3903,14 +3835,9 @@ export default function SimV4() {
                   {getCp(primaryCoin) > 0 ? fmt(getCp(primaryCoin), getCp(primaryCoin) > 100 ? 2 : 4) : "—"}
                 </span>
               </div>
-              <div style={{ fontSize: 9, marginTop: 3, color: priceSourceColor, fontFamily: "'DM Sans'", display: "flex", alignItems: "center", gap: 4 }}>
-                <span style={{ display: "inline-block", width: 4, height: 4, borderRadius: "50%", background: priceSourceColor }} />
-                {priceSourceLabel}
-                {coinFundingRates[primaryCoin] && (
-                  <span style={{ marginLeft: 6, color: Number(coinFundingRates[primaryCoin]) >= 0 ? "#34d399" : "#f87171", fontFamily: "'IBM Plex Mono'" }}>
-                    펀딩 {Number(coinFundingRates[primaryCoin]) > 0 ? "+" : ""}{(Number(coinFundingRates[primaryCoin]) * 100).toFixed(4)}%
-                  </span>
-                )}
+              <div style={{ fontSize: 9, marginTop: 3, color: priceConnected ? "#34d399" : "#6b7280", fontFamily: "'DM Sans'", display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ display: "inline-block", width: 4, height: 4, borderRadius: "50%", background: priceConnected ? "#34d399" : "#6b7280" }} />
+                {priceConnected ? "실시간" : "가격 대기"}
               </div>
             </div>
           </div>
