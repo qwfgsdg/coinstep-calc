@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Coinstep Admin</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0a0e17; color: #e1e5ee; min-height: 100vh;
+  }
+
+  /* Layout */
+  .header {
+    background: #141926; border-bottom: 1px solid #1e2736;
+    padding: 16px 24px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .header h1 { font-size: 20px; color: #fff; }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .header-email { color: #8b95a5; font-size: 13px; }
+  .main { max-width: 960px; margin: 0 auto; padding: 24px 20px; }
+
+  /* Buttons */
+  .btn {
+    padding: 8px 16px; border-radius: 6px; border: none;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: #1890ff; color: #fff; }
+  .btn-danger { background: #ff4d4f; color: #fff; }
+  .btn-ghost { background: transparent; color: #8b95a5; border: 1px solid #2a3345; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn-success { background: #52c41a; color: #fff; }
+  .btn-warning { background: #faad14; color: #000; }
+
+  /* Cards */
+  .card {
+    background: #141926; border: 1px solid #1e2736; border-radius: 12px;
+    padding: 20px; margin-bottom: 20px;
+  }
+  .card-title { font-size: 16px; font-weight: 600; color: #fff; margin-bottom: 16px; }
+
+  /* Forms */
+  .form-group { margin-bottom: 14px; }
+  .form-group label { display: block; font-size: 13px; color: #8b95a5; margin-bottom: 4px; }
+  .form-group input {
+    width: 100%; padding: 8px 12px; border-radius: 6px;
+    border: 1px solid #2a3345; background: #0a0e17; color: #e1e5ee;
+    font-size: 14px; outline: none;
+  }
+  .form-group input:focus { border-color: #1890ff; }
+  .form-row { display: flex; gap: 12px; }
+  .form-row .form-group { flex: 1; }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; color: #8b95a5; font-weight: 600; border-bottom: 1px solid #1e2736; white-space: nowrap; }
+  td { padding: 10px 12px; border-bottom: 1px solid #1e273622; white-space: nowrap; }
+  tr:hover td { background: #1a2234; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge-admin { background: #722ed122; color: #b37feb; }
+  .badge-user { background: #1890ff22; color: #69b1ff; }
+  .badge-active { background: #52c41a22; color: #95de64; }
+  .badge-inactive { background: #ff4d4f22; color: #ff7875; }
+
+  /* Token display */
+  .token-box {
+    background: #0a0e17; border: 1px solid #52c41a44; border-radius: 8px;
+    padding: 14px; margin-top: 12px; word-break: break-all;
+    font-family: 'SF Mono', Consolas, monospace; font-size: 13px; color: #52c41a;
+  }
+  .token-box .label { color: #8b95a5; font-family: inherit; font-size: 12px; margin-bottom: 4px; }
+  .copy-btn { margin-top: 8px; }
+
+  /* Toast */
+  .toast {
+    position: fixed; top: 20px; right: 20px; z-index: 9999;
+    padding: 12px 20px; border-radius: 8px; font-size: 14px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3); color: #fff;
+    transition: opacity 0.3s; max-width: 350px;
+  }
+
+  /* Stats */
+  .stats { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .stat-card {
+    flex: 1; min-width: 140px; background: #141926; border: 1px solid #1e2736;
+    border-radius: 8px; padding: 14px; text-align: center;
+  }
+  .stat-num { font-size: 28px; font-weight: 700; color: #1890ff; }
+  .stat-label { font-size: 12px; color: #8b95a5; margin-top: 4px; }
+
+  /* Login view */
+  .login-wrap {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 80vh;
+  }
+  .login-card { width: 360px; }
+
+  /* Hidden */
+  .hidden { display: none !important; }
+
+  /* Responsive */
+  @media (max-width: 600px) {
+    .form-row { flex-direction: column; gap: 0; }
+    .stats { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== Login View ===== -->
+<div id="loginView" class="login-wrap">
+  <div class="card login-card">
+    <div class="card-title">Coinstep Admin</div>
+    <div id="setupNotice" class="hidden" style="margin-bottom:14px; padding:10px; background:#faad1411; border:1px solid #faad1433; border-radius:6px; color:#d4a520; font-size:13px;">
+      관리자 계정이 없습니다. 초기 설정을 진행하세요.
+    </div>
+    <div class="form-group">
+      <label>이메일</label>
+      <input type="email" id="loginEmail" placeholder="admin@example.com">
+    </div>
+    <div class="form-group">
+      <label>비밀번호</label>
+      <input type="password" id="loginPassword" placeholder="8자 이상">
+    </div>
+    <div style="display:flex; gap:8px; margin-top:4px;">
+      <button class="btn btn-primary" style="flex:1" onclick="doLogin()">로그인</button>
+      <button class="btn btn-ghost" id="setupBtn" onclick="doSetup()">초기 설정</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Dashboard View ===== -->
+<div id="dashboardView" class="hidden">
+  <div class="header">
+    <h1>Coinstep Admin</h1>
+    <div class="header-right">
+      <span class="header-email" id="adminEmail"></span>
+      <button class="btn btn-ghost btn-sm" onclick="doLogout()">로그아웃</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <!-- Stats -->
+    <div class="stats" id="statsRow">
+      <div class="stat-card"><div class="stat-num" id="statUsers">-</div><div class="stat-label">전체 사용자</div></div>
+      <div class="stat-card"><div class="stat-num" id="statActive">-</div><div class="stat-label">활성 사용자</div></div>
+      <div class="stat-card"><div class="stat-num" id="statHistories">-</div><div class="stat-label">총 거래내역</div></div>
+    </div>
+
+    <!-- Create User -->
+    <div class="card">
+      <div class="card-title">사용자 추가</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Tapbit MaskId *</label>
+          <input type="text" id="newMaskId" placeholder="Tapbit 마스크 ID">
+        </div>
+        <div class="form-group">
+          <label>이메일 (선택)</label>
+          <input type="email" id="newEmail" placeholder="user@example.com">
+        </div>
+        <div class="form-group">
+          <label>비고 (선택)</label>
+          <input type="text" id="newRemark" placeholder="메모">
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="createUser()">사용자 생성 + SyncToken 발급</button>
+
+      <div id="tokenResult" class="hidden">
+        <div class="token-box">
+          <div class="label">SyncToken (이 화면을 닫으면 다시 볼 수 없습니다)</div>
+          <div id="tokenValue"></div>
+        </div>
+        <button class="btn btn-ghost btn-sm copy-btn" onclick="copyToken()">복사</button>
+      </div>
+    </div>
+
+    <!-- User List -->
+    <div class="card">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+        <div class="card-title" style="margin-bottom:0;">사용자 목록</div>
+        <button class="btn btn-ghost btn-sm" onclick="loadUsers()">새로고침</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>MaskId</th>
+              <th>이메일</th>
+              <th>비고</th>
+              <th>역할</th>
+              <th>상태</th>
+              <th>포지션</th>
+              <th>계좌</th>
+              <th>거래내역</th>
+              <th>마지막 동기화</th>
+              <th>가입일</th>
+              <th>관리</th>
+            </tr>
+          </thead>
+          <tbody id="userTableBody">
+            <tr><td colspan="12" style="text-align:center; color:#8b95a5; padding:40px;">로딩 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  "use strict";
+
+  var API = location.origin;
+  var token = localStorage.getItem("coinstep_admin_token") || "";
+  var adminUser = null;
+
+  // ── Init ──
+  if (token) {
+    showDashboard();
+  } else {
+    checkSetupNeeded();
+  }
+
+  // ── Auth ──
+  function checkSetupNeeded() {
+    // Try login with empty creds to see if we get ADMIN_EXISTS-type response
+    // Actually just show login form. Setup button is always visible.
+  }
+
+  window.doSetup = function() {
+    var email = document.getElementById("loginEmail").value.trim();
+    var password = document.getElementById("loginPassword").value;
+    if (!email || !password) return toast("이메일과 비밀번호를 입력하세요", "error");
+    if (password.length < 8) return toast("비밀번호는 8자 이상이어야 합니다", "error");
+
+    api("POST", "/api/admin/setup", { email: email, password: password }).then(function(res) {
+      if (res.success) {
+        toast("관리자 계정 생성 완료! 로그인하세요.", "success");
+      }
+    }).catch(function(err) {
+      if (err.error === "ADMIN_EXISTS") toast("관리자 계정이 이미 존재합니다. 로그인하세요.", "warn");
+      else toast(err.message || "설정 실패", "error");
+    });
+  };
+
+  window.doLogin = function() {
+    var email = document.getElementById("loginEmail").value.trim();
+    var password = document.getElementById("loginPassword").value;
+    if (!email || !password) return toast("이메일과 비밀번호를 입력하세요", "error");
+
+    api("POST", "/api/admin/login", { email: email, password: password }).then(function(res) {
+      token = res.token;
+      adminUser = res.user;
+      localStorage.setItem("coinstep_admin_token", token);
+      showDashboard();
+      toast("로그인 성공", "success");
+    }).catch(function(err) {
+      toast(err.message || "로그인 실패", "error");
+    });
+  };
+
+  window.doLogout = function() {
+    token = "";
+    adminUser = null;
+    localStorage.removeItem("coinstep_admin_token");
+    document.getElementById("loginView").classList.remove("hidden");
+    document.getElementById("dashboardView").classList.add("hidden");
+    document.getElementById("loginEmail").value = "";
+    document.getElementById("loginPassword").value = "";
+  };
+
+  function showDashboard() {
+    document.getElementById("loginView").classList.add("hidden");
+    document.getElementById("dashboardView").classList.remove("hidden");
+    if (adminUser) {
+      document.getElementById("adminEmail").textContent = adminUser.email;
+    }
+    loadUsers();
+  }
+
+  // ── Users ──
+  window.loadUsers = function() {
+    var tbody = document.getElementById("userTableBody");
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#8b95a5;padding:40px;">로딩 중...</td></tr>';
+
+    api("GET", "/api/admin/users").then(function(res) {
+      var users = res.users || [];
+      updateStats(users);
+      renderUsers(users);
+    }).catch(function(err) {
+      if (err.status === 401 || err.status === 403) {
+        toast("세션이 만료되었습니다. 다시 로그인하세요.", "error");
+        window.doLogout();
+        return;
+      }
+      tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#ff4d4f;padding:40px;">불러오기 실패</td></tr>';
+    });
+  };
+
+  function updateStats(users) {
+    var active = users.filter(function(u) { return u.isActive; });
+    var totalHistories = users.reduce(function(sum, u) { return sum + (u.counts ? u.counts.histories : 0); }, 0);
+    document.getElementById("statUsers").textContent = users.length;
+    document.getElementById("statActive").textContent = active.length;
+    document.getElementById("statHistories").textContent = totalHistories.toLocaleString();
+  }
+
+  function renderUsers(users) {
+    var tbody = document.getElementById("userTableBody");
+    if (users.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#8b95a5;padding:40px;">등록된 사용자가 없습니다</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = users.map(function(u) {
+      var roleBadge = u.role === "admin"
+        ? '<span class="badge badge-admin">Admin</span>'
+        : '<span class="badge badge-user">User</span>';
+      var statusBadge = u.isActive
+        ? '<span class="badge badge-active">Active</span>'
+        : '<span class="badge badge-inactive">Inactive</span>';
+      var counts = u.counts || {};
+      var lastSync = u.lastSyncedAt ? formatDate(u.lastSyncedAt) : "-";
+      var created = u.createdAt ? formatDate(u.createdAt) : "-";
+      var toggleBtn = u.role === "admin" ? ""
+        : (u.isActive
+          ? '<button class="btn btn-danger btn-sm" onclick="toggleUser(' + u.id + ')">비활성화</button>'
+          : '<button class="btn btn-success btn-sm" onclick="toggleUser(' + u.id + ')">활성화</button>');
+
+      return '<tr>' +
+        '<td>' + u.id + '</td>' +
+        '<td>' + esc(u.tapbitMaskId || "-") + '</td>' +
+        '<td>' + esc(u.email || "-") + '</td>' +
+        '<td>' + esc(u.remarkName || "-") + '</td>' +
+        '<td>' + roleBadge + '</td>' +
+        '<td>' + statusBadge + '</td>' +
+        '<td>' + (counts.positions || 0) + '</td>' +
+        '<td>' + (counts.accounts || 0) + '</td>' +
+        '<td>' + (counts.histories || 0) + '</td>' +
+        '<td>' + lastSync + '</td>' +
+        '<td>' + created + '</td>' +
+        '<td>' + toggleBtn + '</td>' +
+        '</tr>';
+    }).join("");
+  }
+
+  window.toggleUser = function(userId) {
+    api("PATCH", "/api/admin/users/" + userId).then(function(res) {
+      toast(res.isActive ? "사용자 활성화됨" : "사용자 비활성화됨", "success");
+      loadUsers();
+    }).catch(function(err) {
+      toast(err.message || "업데이트 실패", "error");
+    });
+  };
+
+  window.createUser = function() {
+    var maskId = document.getElementById("newMaskId").value.trim();
+    var email = document.getElementById("newEmail").value.trim();
+    var remarkName = document.getElementById("newRemark").value.trim();
+
+    if (!maskId) return toast("Tapbit MaskId를 입력하세요", "error");
+
+    api("POST", "/api/admin/users", {
+      tapbitMaskId: maskId,
+      email: email || undefined,
+      remarkName: remarkName || undefined
+    }).then(function(res) {
+      document.getElementById("tokenValue").textContent = res.syncToken;
+      document.getElementById("tokenResult").classList.remove("hidden");
+      document.getElementById("newMaskId").value = "";
+      document.getElementById("newEmail").value = "";
+      document.getElementById("newRemark").value = "";
+      toast("사용자 생성 완료! SyncToken을 복사하세요.", "success");
+      loadUsers();
+    }).catch(function(err) {
+      toast(err.message || "생성 실패", "error");
+    });
+  };
+
+  window.copyToken = function() {
+    var val = document.getElementById("tokenValue").textContent;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(val).then(function() { toast("복사 완료", "success"); });
+    } else {
+      // Fallback
+      var ta = document.createElement("textarea");
+      ta.value = val; document.body.appendChild(ta);
+      ta.select(); document.execCommand("copy");
+      document.body.removeChild(ta);
+      toast("복사 완료", "success");
+    }
+  };
+
+  // ── API helper ──
+  function api(method, path, body) {
+    var opts = {
+      method: method,
+      headers: { "Content-Type": "application/json" }
+    };
+    if (token) opts.headers["Authorization"] = "Bearer " + token;
+    if (body) opts.body = JSON.stringify(body);
+
+    return fetch(API + path, opts).then(function(res) {
+      return res.json().then(function(data) {
+        if (!res.ok) {
+          var err = new Error(data.message || "Request failed");
+          err.error = data.error;
+          err.status = res.status;
+          throw err;
+        }
+        return data;
+      });
+    });
+  }
+
+  // ── Utils ──
+  function formatDate(str) {
+    if (!str) return "-";
+    var d = new Date(str);
+    if (isNaN(d.getTime())) return str;
+    var pad = function(n) { return n < 10 ? "0" + n : n; };
+    return d.getFullYear() + "-" + pad(d.getMonth()+1) + "-" + pad(d.getDate()) + " " +
+           pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  function esc(s) {
+    var div = document.createElement("div");
+    div.appendChild(document.createTextNode(s));
+    return div.innerHTML;
+  }
+
+  function toast(msg, type) {
+    var existing = document.querySelector(".toast");
+    if (existing) existing.remove();
+
+    var colors = { info: "#1890ff", success: "#52c41a", error: "#ff4d4f", warn: "#faad14" };
+    var el = document.createElement("div");
+    el.className = "toast";
+    el.style.background = colors[type] || colors.info;
+    if (type === "warn") el.style.color = "#000";
+    el.textContent = msg;
+    document.body.appendChild(el);
+
+    setTimeout(function() {
+      el.style.opacity = "0";
+      setTimeout(function() { if (el.parentNode) el.remove(); }, 300);
+    }, 3000);
+  }
+
+  // Enter key → login
+  document.getElementById("loginPassword").addEventListener("keydown", function(e) {
+    if (e.key === "Enter") window.doLogin();
+  });
+})();
+</script>
+</body>
+</html>

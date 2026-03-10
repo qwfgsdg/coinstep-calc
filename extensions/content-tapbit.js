@@ -1,6 +1,6 @@
 /**
  * content-tapbit.js — agent.tapbit.com에 주입되는 content script
- * 
+ *
  * 역할:
  * 1. inject-tapbit.js를 페이지 컨텍스트에 삽입
  * 2. 캡처된 데이터를 background.js로 중계
@@ -44,6 +44,15 @@
         profile: e.data.profile,
       }).catch(() => {});
     }
+
+    // histories 데이터 중계
+    if (type === "__TAPBIT_HISTORIES__") {
+      chrome.runtime.sendMessage({
+        type: "DATA_HISTORIES",
+        data: e.data.data,
+      }).catch(() => {});
+    }
+
   });
 
   // ── background에서 보내는 명령 수신 ──
@@ -71,6 +80,9 @@
     if (msg.type === "CHECK_PAGE_READY") {
       sendResponse({ ready: true, url: window.location.href });
     }
+
+    // summary API는 이제 background.js에서 직접 fetch (host_permissions CORS 우회)
+
   });
 
   // ── 로드 완료 알림 (페이지 로드 후) ──

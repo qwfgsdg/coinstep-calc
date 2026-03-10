@@ -1,9 +1,31 @@
 import { useState, useCallback, useMemo, useEffect, useRef, Fragment } from "react";
 
 /* ═══════════════════════════════════════════
-   CONSTANTS & UTILITIES
+   SECTION 1: CONSTANTS & FALLBACKS
    ═══════════════════════════════════════════ */
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+// Fallback 상수 (Tapbit instruments API 실패 시 사용)
+const FALLBACK_COINS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK"];
+const FALLBACK_COINS_PRIMARY = ["BTC", "ETH", "SOL", "XRP"];
+const FALLBACK_COINS_MORE = ["DOGE", "ADA", "AVAX", "LINK"];
+const FALLBACK_LEV_PRESETS = [5, 10, 20, 25, 50, 75, 100, 125];
+const FALLBACK_QTY_STEPS = {
+  BTC: 0.001, ETH: 0.01, SOL: 0.1, XRP: 1,
+  DOGE: 1, ADA: 1, AVAX: 0.1, LINK: 0.1,
+};
+
+// 동적 심볼 매핑 (Tapbit instrument_id → 코인명)
+const parseSymbol = (s) => s.replace("-SWAP", "").replace("USDT", "");
+
+// PosCard 등 서브 컴포넌트용 모듈 레벨 참조 (SimV4 내부 useMemo와 별도)
+let COINS_PRIMARY = [...FALLBACK_COINS_PRIMARY];
+let COINS_MORE = [...FALLBACK_COINS_MORE];
+let LEV_PRESETS = [...FALLBACK_LEV_PRESETS];
+
+/* ═══════════════════════════════════════════
+   SECTION 2: UTILITIES
+   ═══════════════════════════════════════════ */
 const n = (v) => Number(v) || 0;
 const fmt = (v, d = 2) =>
   v != null && isFinite(v)
@@ -12,10 +34,9 @@ const fmt = (v, d = 2) =>
 const fmtS = (v, d = 2) => (v >= 0 ? "+" : "") + fmt(v, d);
 const pct = (a, b) => (b !== 0 ? (a / b) * 100 : 0);
 
-const COIN_QTY_STEPS = {
-  BTC: 0.001, ETH: 0.01, SOL: 0.1, XRP: 1,
-  DOGE: 1, ADA: 1, AVAX: 0.1, LINK: 0.1,
-};
+// ── 투입금액 ↔ 표시마진 변환 (Tapbit USDT 무기한) ──
+// qtyStepOverride: exchangeInfo에서 가져온 동적 step (없으면 fallback)
+let COIN_QTY_STEPS = { ...FALLBACK_QTY_STEPS };
 
 function fromInput(input, entry, lev, fee, dir, coin) {
   if (!input || !entry || !lev) return null;
@@ -46,32 +67,131 @@ function fromDisplay(margin, entry, lev, fee, dir) {
   return margin + qty * entry * fee + qty * bkPrice * fee;
 }
 
+/* ═══════════════════════════════════════════
+   DATA FACTORIES
+   ═══════════════════════════════════════════ */
+const mkPos = (ov = {}) => ({
+  id: uid(), dir: "long", coin: "ETH",
+  entryPrice: "", margin: "", leverage: 50, ...ov,
+});
 const mkDCA = () => ({ id: uid(), price: "", margin: "" });
 const mkPyra = () => ({ id: uid(), price: "", margin: "" });
-const LEV_PRESETS = [5, 10, 20, 25, 50, 75, 100, 125];
+
+/* ═══════════════════════════════════════════
+   PERSISTENT STORAGE (MULTI-PROFILE)
+   ═══════════════════════════════════════════ */
+const STORAGE_KEY_LEGACY = "simv4-data";
+const STORAGE_KEY_PROFILES = "simv4-profiles";
+const STORAGE_KEY_ACTIVE = "simv4-active-profile";
+const profileDataKey = (id) => `simv4-data-${id}`;
+
+const PROFILE_COLORS = [
+  { id: "emerald", hex: "#34d399", label: "에메랄드" },
+  { id: "sky",     hex: "#0ea5e9", label: "스카이" },
+  { id: "violet",  hex: "#a78bfa", label: "바이올렛" },
+  { id: "amber",   hex: "#f59e0b", label: "앰버" },
+  { id: "rose",    hex: "#f87171", label: "로즈" },
+  { id: "pink",    hex: "#ec4899", label: "핑크" },
+  { id: "lime",    hex: "#84cc16", label: "라임" },
+  { id: "cyan",    hex: "#22d3ee", label: "시안" },
+];
+
+const mkProfile = (name = "기본 프로필", colorId = "emerald") => ({
+  id: uid(),
+  name,
+  colorId,
+  createdAt: Date.now(),
+  lastUsed: Date.now(),
+});
+
+const storageAdapter = {
+  async save(key, data) {
+    const json = JSON.stringify(data);
+    try {
+      if (window.storage) {
+        await window.storage.set(key, json);
+        return true;
+      } else if (window.localStorage) {
+        localStorage.setItem(key, json);
+        return true;
+      }
+    } catch (e) { console.warn("Storage save failed:", e); }
+    return false;
+  },
+  async load(key) {
+    try {
+      if (window.storage) {
+        const result = await window.storage.get(key);
+        return result ? JSON.parse(result.value) : null;
+      } else if (window.localStorage) {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : null;
+      }
+    } catch (e) { console.warn("Storage load failed:", e); }
+    return null;
+  },
+  async clear(key) {
+    try {
+      if (window.storage) { await window.storage.delete(key); }
+      else if (window.localStorage) { localStorage.removeItem(key); }
+    } catch (e) { console.warn("Storage clear failed:", e); }
+  },
+};
 
 /* ═══════════════════════════════════════════
    MAIN COMPONENT
    ═══════════════════════════════════════════ */
 export default function SimV4() {
-  // ── 데이터 소스 (Tapbit 동기화) ──
-  const [tapbitData, setTapbitData] = useState(null);
-  const [selectedUserId, setSelectedUserId] = useState(null);
-  const [lastSyncTime, setLastSyncTime] = useState(null);
-
-  // ── 로컬 편집 가능 상태 (selectedUser에서 자동 채움, 시뮬레이션 시 수정 가능) ──
   const [wallet, setWallet] = useState("");
-  const [coinPrices, setCoinPrices] = useState({});
-  const [coinLiqPrices, setCoinLiqPrices] = useState({});
-  const [positions, setPositions] = useState([]);
-  const feeRate = "0.04"; // Tapbit 고정
+  const [coinPrices, setCoinPrices] = useState({}); // { ETH: "2647.35", BTC: "97340" }
+  const [feeRate, setFeeRate] = useState("0.04");
+  const [coinLiqPrices, setCoinLiqPrices] = useState({}); // 코인별 거래소 청산가
   const setLiqPrice = (coin, val) => setCoinLiqPrices(prev => ({ ...prev, [coin]: val }));
   const getLiqPrice = (coin) => n(coinLiqPrices[coin] || "");
 
-  // ── 실시간 가격 (Binance REST) ──
-  const [priceConnected, setPriceConnected] = useState(false);
+  // ── 실시간 가격 & Tapbit WebSocket ──
+  const [priceMode, setPriceMode] = useState("manual"); // "live" | "manual"
+  const [priceSource, setPriceSource] = useState("disconnected"); // "tapbit-ws" | "reconnecting" | "binance-rest" | "disconnected"
+  const [lastFetch, setLastFetch] = useState(null);
+  const [priceDir, setPriceDir] = useState(null); // "up" | "down" | null
+  const [fetchError, setFetchError] = useState(false);
+  const priceDirTimer = useRef(null);
+  const [coinFundingRates, setCoinFundingRates] = useState({}); // { BTC: "0.000298", ETH: "0.0001" }
+  const [coinLastPrices, setCoinLastPrices] = useState({});      // lastPrice (참고용, markPrice와 분리)
+  const priceBufferRef = useRef({}); // WebSocket 메시지 버퍼 (렌더링 안 함)
+  const wsRef = useRef(null);
+  const reconnectRef = useRef(0);
+  const flushTimerRef = useRef(null);
 
-  // ── 시뮬레이션 State (전부 유지) ──
+  // ── 거래쌍 동적 정보 ──
+  const [exchangeInfo, setExchangeInfo] = useState(null); // { BTC: { leverages, multiplier, ... }, ... }
+
+  // ── Tapbit 크롬 확장 연동 ──
+  const [extensionReady, setExtensionReady] = useState(false);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncError, setSyncError] = useState(null);
+  const [tapbitUsers, setTapbitUsers] = useState([]); // 유저 목록
+  const [tapbitUserDropdown, setTapbitUserDropdown] = useState(false);
+  const [syncSource, setSyncSource] = useState(null); // { maskId, label, time }
+
+  // 가격 소스 라벨
+  const priceSourceLabel = useMemo(() => ({
+    "tapbit-ws": "Tapbit 실시간 · markPrice",
+    "reconnecting": "Tapbit 재연결 중...",
+    "binance-rest": "Binance 대체 연결",
+    "disconnected": "수동 입력",
+  }[priceSource]), [priceSource]);
+  const priceSourceColor = useMemo(() => ({
+    "tapbit-ws": "#34d399",
+    "reconnecting": "#f59e0b",
+    "binance-rest": "#0ea5e9",
+    "disconnected": "#6b7280",
+  }[priceSource]), [priceSource]);
+
+  const [positions, setPositions] = useState([
+    mkPos(),
+  ]);
+
   const [selId, setSelId] = useState(null);
   const [dcaMode, setDcaMode] = useState("sim");
   const [dcaEntries, setDcaEntries] = useState([mkDCA()]);
@@ -81,15 +201,17 @@ export default function SimV4() {
   const [closeRatio, setCloseRatio] = useState("50");
   const [closePrice, setClosePrice] = useState("");
 
+  // ── 헷지 시뮬레이션 ──
   const [hedgeId, setHedgeId] = useState(null);
   const [hedgeEntry, setHedgeEntry] = useState("");
   const [hedgeMargin, setHedgeMargin] = useState("");
   const [hedgeLev, setHedgeLev] = useState("");
-  const [hedgeLive, setHedgeLive] = useState(true);
+  const [hedgeLive, setHedgeLive] = useState(true); // 헷지 진입가 실시간 연동
   const [splitMode, setSplitMode] = useState(false);
   const [splitTotal, setSplitTotal] = useState("");
   const [splitPrices, setSplitPrices] = useState(["", "", ""]);
 
+  // ── Pyramiding (불타기) state ──
   const [pyraMode, setPyraMode] = useState(false);
   const [pyraLockedId, setPyraLockedId] = useState(null);
   const [pyraCounterId, setPyraCounterId] = useState(null);
@@ -101,172 +223,629 @@ export default function SimV4() {
   const [pyraSplitTotal, setPyraSplitTotal] = useState("");
   const [pyraSplitPrices, setPyraSplitPrices] = useState(["", "", ""]);
 
-  const [scCloseRatios, setScCloseRatios] = useState({});
-  const [scTargets, setScTargets] = useState({});
+  // ── 동시청산 계산기 ──
+  const [scCloseRatios, setScCloseRatios] = useState({}); // { ETH: { long: "100", short: "100" } }
+  const [scTargets, setScTargets] = useState({}); // { ETH: "50" }
   const getScRatio = (coin, dir) => scCloseRatios[coin]?.[dir] || "100";
   const setScRatio = (coin, dir, val) => setScCloseRatios(prev => ({ ...prev, [coin]: { ...(prev[coin] || {}), [dir]: val } }));
   const getScTarget = (coin) => scTargets[coin] || "";
   const setScTarget = (coin, val) => setScTargets(prev => ({ ...prev, [coin]: val }));
 
-  const [appTab, setAppTab] = useState("sim");
-  const [hcMargin, setHcMargin] = useState("1000");
-  const [hcLeverage, setHcLeverage] = useState("100");
-  const [hcTakeROE, setHcTakeROE] = useState("40");
-  const [hcCutRatio, setHcCutRatio] = useState("50");
-  const [hcRecoveryROE, setHcRecoveryROE] = useState("0");
-  const [hcKillPct, setHcKillPct] = useState("15");
-  const [hcLongEntry, setHcLongEntry] = useState("");
-  const [hcShortEntry, setHcShortEntry] = useState("");
-  const [hcLongMargin, setHcLongMargin] = useState("");
-  const [hcShortMargin, setHcShortMargin] = useState("");
-  const [hcCycles, setHcCycles] = useState([]);
+  // ── 헷지 사이클 전략 ──
+  const [appTab, setAppTab] = useState("sim"); // "sim" | "hedge"
+  const [hcMargin, setHcMargin] = useState("1000");         // 한쪽 기본 마진
+  const [hcLeverage, setHcLeverage] = useState("100");       // 레버리지
+  const [hcTakeROE, setHcTakeROE] = useState("40");          // 익절 ROE %
+  const [hcCutRatio, setHcCutRatio] = useState("50");        // 손절 비율 %
+  const [hcRecoveryROE, setHcRecoveryROE] = useState("0");   // 복구 ROE %
+  const [hcKillPct, setHcKillPct] = useState("15");          // 킬 스위치 %
+  const [hcLongEntry, setHcLongEntry] = useState("");        // 롱 진입가
+  const [hcShortEntry, setHcShortEntry] = useState("");      // 숏 진입가
+  const [hcLongMargin, setHcLongMargin] = useState("");      // 롱 현재 마진
+  const [hcShortMargin, setHcShortMargin] = useState("");    // 숏 현재 마진
+  const [hcCycles, setHcCycles] = useState([]);              // 사이클 히스토리
 
-  // ── 파생 값 ──
+  // ── 사용 중인 코인 자동 감지 ──
   const usedCoins = useMemo(() => [...new Set(positions.map(p => p.coin))].sort(), [positions]);
   const getCp = (coin) => n(coinPrices[coin] || "");
   const setCp = (coin, val) => setCoinPrices(prev => ({ ...prev, [coin]: val }));
-  const primaryCoin = usedCoins[0] || "BTC";
+  const primaryCoin = usedCoins[0] || "ETH";
   const hasAnyPrice = usedCoins.some(c => getCp(c) > 0);
 
-  // ── 유저 파싱 (tapbitData → 구조화) ──
-  const parsedUsers = useMemo(() => {
-    if (!tapbitData?.positions?.length) return [];
-    const userMap = {};
-    tapbitData.positions.forEach(item => {
-      const id = item.maskId;
-      if (!userMap[id]) {
-        userMap[id] = { maskId: id, label: item.remarkName || item.nickname || `User-${id}`, positions: [], wallet: "0" };
-      }
-      if (item.data) {
-        const d = item.data;
-        userMap[id].positions.push({
-          id: `${id}-${d.contractName}-${d.direction}`,
-          coin: (d.contractName || "").replace("USDT", ""),
-          dir: d.direction === 1 ? "long" : "short",
-          entryPrice: String(d.averagePrice),
-          margin: String(d.margin),
-          leverage: Number(d.leverage),
-          liquidationPrice: String(d.liquidationPrice || ""),
-          unrealisedPnl: String(d.unrealisedPnl || "0"),
-          roe: String(d.roe || "0"),
-        });
-      }
-    });
-    (tapbitData.accounts || []).forEach(item => {
-      if (userMap[item.maskId] && item.data) userMap[item.maskId].wallet = item.data.contractAmount || "0";
-    });
-    return Object.values(userMap).filter(u => u.positions.length > 0).sort((a, b) => Number(b.wallet) - Number(a.wallet));
-  }, [tapbitData]);
+  const [saveStatus, setSaveStatus] = useState(null); // "saved" | "saving" | null
+  const [dataLoaded, setDataLoaded] = useState(false);
+  const saveTimer = useRef(null);
 
-  const selectedUser = useMemo(() => {
-    if (!selectedUserId) return null;
-    return parsedUsers.find(u => u.maskId === selectedUserId) || null;
-  }, [parsedUsers, selectedUserId]);
+  // ── 멀티 프로필 시스템 ──
+  const [profiles, setProfiles] = useState([]);
+  const [activeProfileId, setActiveProfileId] = useState(null);
+  const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
+  const [profileModal, setProfileModal] = useState(null); // null | "create" | "rename"
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [profileModalName, setProfileModalName] = useState("");
+  const [profileModalColor, setProfileModalColor] = useState("emerald");
+  const profileDropdownRef = useRef(null);
+  const activeProfile = profiles.find(p => p.id === activeProfileId);
+  const activeColor = PROFILE_COLORS.find(c => c.id === (activeProfile?.colorId || "emerald"))?.hex || "#34d399";
 
-  // ── selectedUser 변경 → 로컬 상태 동기화 ──
-  useEffect(() => {
-    if (!selectedUser) return;
-    setWallet(selectedUser.wallet);
-    setPositions(selectedUser.positions);
-    const liqMap = {};
-    selectedUser.positions.forEach(p => {
-      if (p.liquidationPrice && !liqMap[p.coin]) liqMap[p.coin] = p.liquidationPrice;
-    });
-    setCoinLiqPrices(liqMap);
-    // 시뮬레이션 상태 초기화
-    setSelId(null); setHedgeId(null);
-    setPyraMode(false); setPyraLockedId(null); setPyraCounterId(null);
-    setDcaEntries([mkDCA()]); setDcaMode("sim");
-  }, [selectedUser]);
-
-  // selectedUser 사라짐 체크
-  useEffect(() => {
-    if (selectedUserId && parsedUsers.length > 0 && !parsedUsers.find(u => u.maskId === selectedUserId)) {
-      setSelectedUserId(null);
-      setPositions([]); setWallet("");
+  // ── 프로필 데이터를 state에 적용하는 헬퍼 ──
+  const applyProfileData = (data) => {
+    if (!data) return;
+    if (data.wallet != null) setWallet(data.wallet);
+    if (data.feeRate != null) setFeeRate(data.feeRate);
+    if (data.coinLiqPrices) setCoinLiqPrices(data.coinLiqPrices);
+    else if (data.exLiqPrice != null) setCoinLiqPrices({ ETH: data.exLiqPrice });
+    if (data.coinPrices) setCoinPrices(data.coinPrices);
+    else if (data.priceCoin) setCoinPrices({});
+    if (data.positions && data.positions.length > 0) {
+      setPositions(data.positions.map((p) => ({ ...mkPos(), ...p, id: p.id || uid() })));
+    } else {
+      setPositions([mkPos()]);
     }
-  }, [parsedUsers, selectedUserId]);
+    if (data.hcMargin != null) setHcMargin(data.hcMargin);
+    if (data.hcLeverage != null) setHcLeverage(data.hcLeverage);
+    if (data.hcTakeROE != null) setHcTakeROE(data.hcTakeROE);
+    if (data.hcCutRatio != null) setHcCutRatio(data.hcCutRatio);
+    if (data.hcRecoveryROE != null) setHcRecoveryROE(data.hcRecoveryROE);
+    if (data.hcKillPct != null) setHcKillPct(data.hcKillPct);
+    if (data.hcLongEntry != null) setHcLongEntry(data.hcLongEntry);
+    if (data.hcShortEntry != null) setHcShortEntry(data.hcShortEntry);
+    if (data.hcLongMargin != null) setHcLongMargin(data.hcLongMargin);
+    if (data.hcShortMargin != null) setHcShortMargin(data.hcShortMargin);
+    if (data.hcCycles) setHcCycles(data.hcCycles);
+  };
 
-  // ── Tapbit 동기화 수신 (chrome.storage → content-calc.js → 여기) ──
-  const [syncMsg, setSyncMsg] = useState(null);
+  const resetToDefaults = () => {
+    setWallet(""); setFeeRate("0.04"); setCoinLiqPrices({}); setCoinPrices({});
+    setPositions([mkPos()]); setSelId(null); setPyraMode(false);
+    setHcMargin("1000"); setHcLeverage("100"); setHcTakeROE("40");
+    setHcCutRatio("50"); setHcRecoveryROE("0"); setHcKillPct("15");
+    setHcLongEntry(""); setHcShortEntry(""); setHcLongMargin("");
+    setHcShortMargin(""); setHcCycles([]);
+  };
+
+  // ── 마운트 시 프로필 시스템 초기화 ──
   useEffect(() => {
-    const onSync = (e) => {
-      const data = e.detail;
-      if (!data) return;
-      if (data.error) {
-        setSyncMsg(data.message || "동기화 실패");
-        return;
-      }
-      if (data.success) {
-        const posCount = data.positions?.length || 0;
-        const accCount = data.accounts?.length || 0;
-        setTapbitData({ positions: data.positions || [], accounts: data.accounts || [], profile: data.profile });
-        setLastSyncTime(data.lastSync || Date.now());
-        if (posCount === 0) {
-          setSyncMsg(`데이터 수신됨 (포지션 ${posCount}, 잔고 ${accCount}) — 확장에서 동기화를 다시 실행해보세요`);
-        } else {
-          setSyncMsg(null);
+    (async () => {
+      let loadedProfiles = await storageAdapter.load(STORAGE_KEY_PROFILES);
+      let targetId = null;
+
+      if (!loadedProfiles || loadedProfiles.length === 0) {
+        // 레거시 데이터 마이그레이션 체크
+        const legacyData = await storageAdapter.load(STORAGE_KEY_LEGACY);
+        const defaultProfile = mkProfile("기본 프로필", "emerald");
+        loadedProfiles = [defaultProfile];
+
+        if (legacyData) {
+          // 기존 단일 저장 데이터를 첫 프로필로 마이그레이션
+          await storageAdapter.save(profileDataKey(defaultProfile.id), legacyData);
+          await storageAdapter.clear(STORAGE_KEY_LEGACY);
         }
+        await storageAdapter.save(STORAGE_KEY_PROFILES, loadedProfiles);
+        targetId = defaultProfile.id;
+      } else {
+        // 최근 사용 프로필 자동 선택
+        const savedActiveId = await storageAdapter.load(STORAGE_KEY_ACTIVE);
+        const lastUsedProfile = [...loadedProfiles].sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))[0];
+        targetId = savedActiveId && loadedProfiles.find(p => p.id === savedActiveId)
+          ? savedActiveId
+          : lastUsedProfile?.id || loadedProfiles[0].id;
+      }
+
+      setProfiles(loadedProfiles);
+      setActiveProfileId(targetId);
+
+      // 활성 프로필 데이터 로드
+      const data = await storageAdapter.load(profileDataKey(targetId));
+      if (data) applyProfileData(data);
+
+      // lastUsed 업데이트
+      const updatedProfiles = loadedProfiles.map(p =>
+        p.id === targetId ? { ...p, lastUsed: Date.now() } : p
+      );
+      setProfiles(updatedProfiles);
+      await storageAdapter.save(STORAGE_KEY_PROFILES, updatedProfiles);
+      await storageAdapter.save(STORAGE_KEY_ACTIVE, targetId);
+
+      setDataLoaded(true);
+    })();
+  }, []);
+
+  // A등급 데이터 변경 시 1초 debounce 자동 저장 (활성 프로필에)
+  useEffect(() => {
+    if (!dataLoaded || !activeProfileId) return;
+    clearTimeout(saveTimer.current);
+    setSaveStatus("saving");
+    saveTimer.current = setTimeout(async () => {
+      const data = {
+        wallet, feeRate, coinLiqPrices, coinPrices,
+        positions: positions.map((p) => ({
+          id: p.id, dir: p.dir, coin: p.coin,
+          entryPrice: p.entryPrice, margin: p.margin, leverage: p.leverage,
+        })),
+        hcMargin, hcLeverage, hcTakeROE, hcCutRatio, hcRecoveryROE, hcKillPct,
+        hcLongEntry, hcShortEntry, hcLongMargin, hcShortMargin, hcCycles,
+      };
+      const ok = await storageAdapter.save(profileDataKey(activeProfileId), data);
+      setSaveStatus(ok ? "saved" : null);
+    }, 1000);
+  }, [wallet, feeRate, coinLiqPrices, coinPrices, positions, dataLoaded, activeProfileId,
+      hcMargin, hcLeverage, hcTakeROE, hcCutRatio, hcRecoveryROE, hcKillPct,
+      hcLongEntry, hcShortEntry, hcLongMargin, hcShortMargin, hcCycles]);
+
+  const handleReset = async () => {
+    if (!confirm(`"${activeProfile?.name || "프로필"}"의 데이터를 초기화할까요?`)) return;
+    if (activeProfileId) await storageAdapter.clear(profileDataKey(activeProfileId));
+    resetToDefaults();
+    setSaveStatus(null);
+  };
+
+  // ── 프로필 전환 ──
+  const switchProfile = async (targetId, profilesOverride) => {
+    if (targetId === activeProfileId && !profilesOverride) return;
+    const currentProfiles = profilesOverride || profiles;
+    // 현재 프로필 저장 (flush)
+    clearTimeout(saveTimer.current);
+    if (activeProfileId) {
+      const curData = {
+        wallet, feeRate, coinLiqPrices, coinPrices,
+        positions: positions.map((p) => ({
+          id: p.id, dir: p.dir, coin: p.coin,
+          entryPrice: p.entryPrice, margin: p.margin, leverage: p.leverage,
+        })),
+        hcMargin, hcLeverage, hcTakeROE, hcCutRatio, hcRecoveryROE, hcKillPct,
+        hcLongEntry, hcShortEntry, hcLongMargin, hcShortMargin, hcCycles,
+      };
+      await storageAdapter.save(profileDataKey(activeProfileId), curData);
+    }
+    // 대상 프로필 데이터 로드
+    resetToDefaults();
+    const data = await storageAdapter.load(profileDataKey(targetId));
+    if (data) applyProfileData(data);
+
+    // lastUsed 갱신
+    const updatedProfiles = currentProfiles.map(p =>
+      p.id === targetId ? { ...p, lastUsed: Date.now() } : p
+    );
+    setProfiles(updatedProfiles);
+    setActiveProfileId(targetId);
+    await storageAdapter.save(STORAGE_KEY_PROFILES, updatedProfiles);
+    await storageAdapter.save(STORAGE_KEY_ACTIVE, targetId);
+    setProfileDropdownOpen(false);
+    setSelId(null); setPyraMode(false);
+  };
+
+  // ── 프로필 생성 ──
+  const createProfile = async (name, colorId) => {
+    const newP = mkProfile(name || `프로필 ${profiles.length + 1}`, colorId || "emerald");
+    const updatedProfiles = [...profiles, newP];
+    setProfiles(updatedProfiles);
+    await storageAdapter.save(STORAGE_KEY_PROFILES, updatedProfiles);
+    // 생성 후 바로 전환 (최신 배열 override)
+    await switchProfile(newP.id, updatedProfiles);
+  };
+
+  // ── 프로필 이름/색상 변경 ──
+  const renameProfile = async (id, newName, newColorId) => {
+    const updatedProfiles = profiles.map(p =>
+      p.id === id ? { ...p, name: newName || p.name, colorId: newColorId ?? p.colorId } : p
+    );
+    setProfiles(updatedProfiles);
+    await storageAdapter.save(STORAGE_KEY_PROFILES, updatedProfiles);
+  };
+
+  // ── 프로필 삭제 ──
+  const deleteProfile = async (id) => {
+    if (profiles.length <= 1) { alert("최소 1개 프로필은 유지해야 합니다."); return; }
+    if (!confirm(`"${profiles.find(p => p.id === id)?.name}"을(를) 삭제할까요?`)) return;
+    await storageAdapter.clear(profileDataKey(id));
+    const remaining = profiles.filter(p => p.id !== id);
+    setProfiles(remaining);
+    await storageAdapter.save(STORAGE_KEY_PROFILES, remaining);
+    if (activeProfileId === id) {
+      const next = [...remaining].sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))[0];
+      await switchProfile(next.id, remaining);
+    }
+  };
+
+  // ── 드롭다운 외부 클릭 닫기 ──
+  useEffect(() => {
+    if (!profileDropdownOpen) return;
+    const handler = (e) => {
+      if (profileDropdownRef.current && !profileDropdownRef.current.contains(e.target)) {
+        setProfileDropdownOpen(false);
       }
     };
-    window.addEventListener("tapbit-sync-response", onSync);
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [profileDropdownOpen]);
 
-    // 마운트 후 데이터 요청 (content-calc.js가 storage에서 읽어서 전달)
-    const t1 = setTimeout(() => window.postMessage({ type: "CALC_READ_DATA" }, "*"), 500);
-    const t2 = setTimeout(() => window.postMessage({ type: "CALC_READ_DATA" }, "*"), 2000);
-    const t3 = setTimeout(() => window.postMessage({ type: "CALC_READ_DATA" }, "*"), 5000);
+  // ── 거래쌍 정보 동적 로딩 (마운트 시 1회) ──
+  useEffect(() => {
+    fetch("https://openapi.tapbit.com/swap/api/usdt/instruments/list")
+      .then(r => r.json())
+      .then(resp => {
+        if (!resp?.data) return;
+        const info = {};
+        (Array.isArray(resp.data) ? resp.data : []).forEach(item => {
+          const code = item.contract_code || item.contractCode || "";
+          const coin = code.replace("-SWAP", "");
+          if (!coin) return;
+          info[coin] = {
+            multiplier: Number(item.multiplier || 1),
+            minAmount: Number(item.min_amount || item.minAmount || 1),
+            pricePrecision: Number(item.price_precision || item.pricePrecision || 2),
+            leverages: (item.leverages || "").split(",").map(Number).filter(v => v > 0),
+          };
+          // 동적 qty step 반영
+          COIN_QTY_STEPS[coin] = info[coin].multiplier || info[coin].minAmount || (FALLBACK_QTY_STEPS[coin] ?? 0.001);
+        });
+        if (Object.keys(info).length > 0) {
+          setExchangeInfo(info);
+          // PosCard 등 서브 컴포넌트용 모듈 레벨 상수도 갱신
+          const sorted = Object.keys(info).sort((a, b) => {
+            const order = ["BTC", "ETH", "SOL", "XRP"];
+            const ai = order.indexOf(a), bi = order.indexOf(b);
+            if (ai >= 0 && bi >= 0) return ai - bi;
+            if (ai >= 0) return -1;
+            if (bi >= 0) return 1;
+            return a.localeCompare(b);
+          });
+          COINS_PRIMARY = sorted.slice(0, 4);
+          COINS_MORE = sorted.slice(4);
+          if (info.BTC?.leverages?.length > 0) LEV_PRESETS = info.BTC.leverages;
+        }
+      })
+      .catch(() => { /* Fallback 상수 사용 */ });
+  }, []);
+
+  // ── 실시간 가격 엔진 (Tapbit WS → Binance REST fallback) ──
+  const binanceIntervalRef = useRef(null);
+
+  useEffect(() => {
+    if (priceMode !== "live") {
+      // 수동 모드: 연결 해제
+      if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+      clearInterval(flushTimerRef.current);
+      clearTimeout(binanceIntervalRef.current);
+      setPriceSource("disconnected");
+      return;
+    }
+
+    // ── Binance REST fallback ──
+    const startBinanceFallback = () => {
+      setPriceSource("binance-rest");
+      const controller = new AbortController();
+      let errCount = 0;
+
+      const fetchPrices = async () => {
+        try {
+          const coins = usedCoins.length > 0 ? usedCoins : ["BTC", "ETH"];
+          const results = await Promise.all(
+            coins.map(coin =>
+              fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${coin}USDT`, { signal: controller.signal })
+                .then(r => r.json())
+                .then(d => ({ coin, price: String(parseFloat(d.price)) }))
+            )
+          );
+          errCount = 0;
+          setFetchError(false);
+          setCoinPrices(prev => {
+            const next = { ...prev };
+            let changed = false;
+            results.forEach(({ coin, price }) => {
+              if (next[coin] !== price) { next[coin] = price; changed = true; }
+            });
+            return changed ? next : prev;
+          });
+          setLastFetch(Date.now());
+        } catch (e) {
+          if (e.name === "AbortError") return;
+          errCount++;
+          setFetchError(true);
+        }
+      };
+
+      const scheduleNext = () => {
+        const ms = document.hidden ? 10000 : errCount > 0 ? Math.min(10000 + errCount * 5000, 30000) : 3000;
+        clearTimeout(binanceIntervalRef.current);
+        binanceIntervalRef.current = setTimeout(async () => {
+          await fetchPrices();
+          scheduleNext();
+        }, ms);
+      };
+
+      fetchPrices().then(scheduleNext);
+      return controller;
+    };
+
+    // ── Tapbit WebSocket 연결 ──
+    let binanceController = null;
+
+    const connectTapbitWS = () => {
+      try {
+        const ws = new WebSocket("wss://ws-openapi.tapbit.com/stream/ws");
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ op: "subscribe", args: ["usdt/ticker.all"] }));
+          setPriceSource("tapbit-ws");
+          setFetchError(false);
+          reconnectRef.current = 0;
+          // Binance fallback 정리
+          if (binanceController) { binanceController.abort(); binanceController = null; }
+          clearTimeout(binanceIntervalRef.current);
+        };
+
+        ws.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data);
+            if (!msg.data || !Array.isArray(msg.data)) return;
+            msg.data.forEach(t => {
+              const coin = (t.symbol || "").replace("-SWAP", "");
+              if (!coin) return;
+              priceBufferRef.current[coin] = {
+                mark: t.markPrice || t.lastPrice,
+                last: t.lastPrice,
+                funding: t.fundingRate,
+              };
+            });
+          } catch (err) { /* JSON 파싱 에러 무시 */ }
+        };
+
+        ws.onclose = () => {
+          if (priceMode !== "live") return;
+          reconnectRef.current++;
+          if (reconnectRef.current <= 5) {
+            setPriceSource("reconnecting");
+            const delay = Math.min(1000 * Math.pow(2, reconnectRef.current), 30000);
+            setTimeout(connectTapbitWS, delay);
+          } else {
+            // 5회 실패 → Binance fallback
+            binanceController = startBinanceFallback();
+          }
+        };
+
+        ws.onerror = () => { if (ws.readyState !== WebSocket.CLOSED) ws.close(); };
+      } catch (err) {
+        // WebSocket 생성 자체 실패 → Binance fallback
+        binanceController = startBinanceFallback();
+      }
+    };
+
+    connectTapbitWS();
+
+    // ── 버퍼 → state 플러시 (500ms 주기) ──
+    flushTimerRef.current = setInterval(() => {
+      const buf = priceBufferRef.current;
+      const coins = Object.keys(buf);
+      if (coins.length === 0) return;
+
+      setCoinPrices(prev => {
+        const next = { ...prev };
+        let changed = false;
+        coins.forEach(coin => {
+          const val = buf[coin].mark;
+          if (val && next[coin] !== val) { next[coin] = val; changed = true; }
+        });
+        if (changed) {
+          setPriceDir("up");
+          clearTimeout(priceDirTimer.current);
+          priceDirTimer.current = setTimeout(() => setPriceDir(null), 500);
+        }
+        return changed ? next : prev;
+      });
+
+      // 펀딩비 (변경 시에만 업데이트)
+      setCoinFundingRates(prev => {
+        const next = { ...prev };
+        let changed = false;
+        coins.forEach(coin => {
+          if (buf[coin].funding && next[coin] !== buf[coin].funding) {
+            next[coin] = buf[coin].funding;
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+
+      // lastPrice 별도 저장 (참고용)
+      setCoinLastPrices(prev => {
+        const next = { ...prev };
+        let changed = false;
+        coins.forEach(coin => {
+          if (buf[coin].last && next[coin] !== buf[coin].last) {
+            next[coin] = buf[coin].last;
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+
+      setLastFetch(Date.now());
+      priceBufferRef.current = {};
+    }, 500);
+
+    // 탭 활성화 시 재연결 시도
+    const onVisibility = () => {
+      if (!document.hidden && priceSource !== "tapbit-ws" && priceMode === "live") {
+        reconnectRef.current = 0;
+        if (wsRef.current) wsRef.current.close();
+        connectTapbitWS();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
-      window.removeEventListener("tapbit-sync-response", onSync);
-      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
+      if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+      if (binanceController) binanceController.abort();
+      clearInterval(flushTimerRef.current);
+      clearTimeout(binanceIntervalRef.current);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [priceMode]);
+
+  // ── Web-Sync 스크립트 자동 로드 (확장 미설치 시) ──
+  useEffect(() => {
+    let wsTimer = null;
+    const checkExtension = () => {
+      // 확장이 2초 내에 감지되지 않으면 web-sync.js 로드
+      if (!document.querySelector('script[data-coinstep-websync]') && !window.__COINSTEP_WEBSYNC_LOADED) {
+        window.__COINSTEP_WEBSYNC_LOADED = true;
+        const s = document.createElement("script");
+        s.src = "/web-sync.js"; // 같은 도메인에서 서빙
+        s.dataset.coinstepWebsync = "1";
+        document.head.appendChild(s);
+        console.log("[Calc] Extension not detected — loading web-sync.js");
+      }
+    };
+    // 확장이 준비되면 타이머 취소
+    const onReady = () => { clearTimeout(wsTimer); };
+    window.addEventListener("tapbit-extension-ready", onReady, { once: true });
+    wsTimer = setTimeout(checkExtension, 2500);
+    return () => { clearTimeout(wsTimer); window.removeEventListener("tapbit-extension-ready", onReady); };
+  }, []);
+
+  // ── Tapbit 크롬 확장 연동 ──
+  useEffect(() => {
+    // 확장 감지
+    const onExtReady = () => setExtensionReady(true);
+    window.addEventListener("tapbit-extension-ready", onExtReady);
+
+    // 동기화 응답 수신
+    const onSyncResponse = (e) => {
+      setSyncLoading(false);
+      const data = e.detail;
+
+      if (data?.error) {
+        setSyncError(data.message || "동기화 실패");
+        return;
+      }
+
+      if (!data?.positions) {
+        setSyncError("포지션 데이터가 없습니다");
+        return;
+      }
+
+      // 유저별 그룹핑
+      const userMap = {};
+
+      data.positions.forEach(item => {
+        const uid = item.maskId;
+        if (!userMap[uid]) {
+          userMap[uid] = {
+            maskId: uid,
+            label: item.remarkName || item.nickname || `User-${uid}`,
+            positions: [],
+            wallet: "0",
+          };
+        }
+        if (item.data) {
+          const d = item.data;
+          userMap[uid].positions.push({
+            coin: (d.contractName || "").replace("USDT", ""),
+            dir: d.direction === 1 ? "long" : "short",
+            entryPrice: String(d.averagePrice),
+            margin: String(d.margin),
+            leverage: Number(d.leverage),
+            liquidationPrice: String(d.liquidationPrice),
+            unrealisedPnl: String(d.unrealisedPnl),
+            roe: String(d.roe),
+          });
+        }
+      });
+
+      // accounts 잔고 매칭
+      if (data.accounts) {
+        data.accounts.forEach(item => {
+          const uid = item.maskId;
+          if (userMap[uid] && item.data) {
+            userMap[uid].wallet = item.data.contractAmount || "0";
+          }
+        });
+      }
+
+      // 포지션 있는 유저만, 잔고 큰 순
+      const users = Object.values(userMap)
+        .filter(u => u.positions.length > 0)
+        .sort((a, b) => Number(b.wallet) - Number(a.wallet));
+
+      setTapbitUsers(users);
+      setSyncError(null);
+      if (users.length > 0) setTapbitUserDropdown(true);
+    };
+    window.addEventListener("tapbit-sync-response", onSyncResponse);
+
+    // 상태 응답 수신
+    const onStatusResponse = (e) => {
+      if (e.detail?.connected) setExtensionReady(true);
+    };
+    window.addEventListener("tapbit-status-response", onStatusResponse);
+
+    // 이미 로드된 확장 감지
+    window.postMessage({ type: "CALC_CHECK_STATUS" }, "*");
+
+    return () => {
+      window.removeEventListener("tapbit-extension-ready", onExtReady);
+      window.removeEventListener("tapbit-sync-response", onSyncResponse);
+      window.removeEventListener("tapbit-status-response", onStatusResponse);
     };
   }, []);
 
-  // ── 실시간 가격 (Binance REST 3초 폴링) ──
-  useEffect(() => {
-    if (usedCoins.length === 0) return;
-    let timer = null;
-    const controller = new AbortController();
+  // 동기화 요청 함수
+  const syncFromTapbit = useCallback(() => {
+    setSyncLoading(true);
+    setSyncError(null);
+    window.postMessage({ type: "CALC_SYNC_REQUEST" }, "*");
+    // 3초 타임아웃
+    setTimeout(() => {
+      setSyncLoading(prev => {
+        if (prev) setSyncError("응답 없음 — Tapbit 관리자 페이지가 열려있는지 확인하세요");
+        return false;
+      });
+    }, 5000);
+  }, []);
 
-    const fetchPrices = async () => {
-      try {
-        const results = await Promise.all(
-          usedCoins.map(coin =>
-            fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${coin}USDT`, { signal: controller.signal })
-              .then(r => r.json())
-              .then(d => ({ coin, price: String(parseFloat(d.price)) }))
-          )
-        );
-        setCoinPrices(prev => {
-          const next = { ...prev };
-          let changed = false;
-          results.forEach(({ coin, price }) => {
-            if (next[coin] !== price) { next[coin] = price; changed = true; }
-          });
-          return changed ? next : prev;
-        });
-        setPriceConnected(true);
-      } catch (e) {
-        if (e.name !== "AbortError") setPriceConnected(false);
+  // 유저 선택 → 데이터 적용
+  const applyTapbitUser = useCallback((user) => {
+    if (!user) return;
+    const doApply = !n(wallet) && !positions.some(p => n(p.entryPrice) > 0)
+      ? true
+      : confirm(`"${user.label}"의 데이터로 덮어씁니다. 계속할까요?`);
+    if (!doApply) return;
+
+    // 배치 업데이트 (React 18 자동 배치 → 1회 렌더)
+    setPositions(user.positions.map(tp => mkPos({
+      coin: tp.coin,
+      dir: tp.dir,
+      entryPrice: tp.entryPrice,
+      margin: tp.margin,
+      leverage: tp.leverage,
+    })));
+
+    if (Number(user.wallet) > 0) setWallet(user.wallet);
+
+    // 청산가 자동 채움 (코인별 첫 번째 값)
+    const liqMap = {};
+    user.positions.forEach(tp => {
+      if (tp.liquidationPrice && !liqMap[tp.coin]) {
+        liqMap[tp.coin] = tp.liquidationPrice;
       }
-    };
+    });
+    setCoinLiqPrices(liqMap);
 
-    fetchPrices();
-    timer = setInterval(fetchPrices, document.hidden ? 10000 : 3000);
+    // stale 상태 초기화
+    setSelId(null);
+    setHedgeId(null);
+    setPyraMode(false);
+    setPyraLockedId(null);
+    setPyraCounterId(null);
+    setDcaEntries([mkDCA()]);
+    setDcaMode("sim");
 
-    const onVis = () => {
-      clearInterval(timer);
-      timer = setInterval(fetchPrices, document.hidden ? 10000 : 3000);
-      if (!document.hidden) fetchPrices();
-    };
-    document.addEventListener("visibilitychange", onVis);
-
-    return () => {
-      controller.abort();
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, [usedCoins.join(",")]);
+    setSyncSource({ maskId: user.maskId, label: user.label, time: Date.now() });
+    setTapbitUserDropdown(false);
+  }, [wallet, positions]);
 
   // ── 헷지 진입가 실시간 연동 ──
   useEffect(() => {
@@ -274,76 +853,125 @@ export default function SimV4() {
     const targetPos = positions.find(p => p.id === hedgeId);
     if (!targetPos) return;
     const cp = n(coinPrices[targetPos.coin] || "");
-    if (cp > 0) setHedgeEntry(prev => n(prev) === cp ? prev : String(cp));
+    if (cp > 0) {
+      setHedgeEntry(prev => {
+        const prevN = n(prev);
+        // 값이 동일하면 setState 스킵 (렌더 루프 방지)
+        return prevN === cp ? prev : String(cp);
+      });
+    }
   }, [hedgeLive, hedgeId, coinPrices, positions]);
 
-  // ── 유저 선택 ──
-  const selectUser = useCallback((maskId) => {
-    setSelectedUserId(prev => prev === maskId ? null : maskId);
-  }, []);
-
-  // ── 포지션 관련 함수 ──
-  const updPos = useCallback((id, k, v) =>
-    setPositions(ps => ps.map(p => (p.id === id ? { ...p, [k]: v } : p))), []);
-  const selectPos = (id) => {
-    setSelId(prev => (prev === id ? null : id));
-    setDcaEntries([mkDCA()]); setRevPrice(""); setRevTarget(""); setDcaMode("sim");
-    setHedgeId(null); setPyraMode(false); setPyraLockedId(null); setPyraCounterId(null);
-  };
-  const selectHedge = (id) => {
-    if (hedgeId === id) { setHedgeId(null); return; }
-    setSelId(null); setPyraMode(false); setPyraLockedId(null); setPyraCounterId(null);
-    setHedgeId(id);
-    const targetPos = positions.find(p => p.id === id);
-    const cp = targetPos ? n(coinPrices[targetPos.coin] || "") : 0;
-    setHedgeEntry(cp > 0 ? String(cp) : "");
-    setHedgeLive(true); setHedgeMargin(""); setHedgeLev("");
-  };
-  const selectPyra = (pyraTargetId) => {
-    if (pyraMode && pyraCounterId === pyraTargetId) {
-      setPyraMode(false); setPyraLockedId(null); setPyraCounterId(null); return;
-    }
-    setSelId(null); setHedgeId(null);
-    const target = positions.find(p => p.id === pyraTargetId);
-    if (!target) return;
-    setPyraMode(true); setPyraCounterId(pyraTargetId);
-    setPyraSubMode("sim"); setPyraEntries([mkPyra()]);
-    setPyraRevPrice(""); setPyraRevTarget(""); setPyraSplitMode(false);
-    const lockedDir = target.dir === "long" ? "short" : "long";
-    const candidates = positions.filter(p => p.id !== pyraTargetId && p.dir === lockedDir && p.coin === target.coin);
-    setPyraLockedId(candidates.length === 1 ? candidates[0].id : null);
-  };
-
-  const addDCA = () => setDcaEntries(d => [...d, mkDCA()]);
-  const rmDCA = (id) => setDcaEntries(d => d.filter(x => x.id !== id));
-  const updDCA = useCallback((id, k, v) => setDcaEntries(ds => ds.map(d => (d.id === id ? { ...d, [k]: v } : d))), []);
-  const addPyra = () => setPyraEntries(d => [...d, mkPyra()]);
-  const rmPyra = (id) => setPyraEntries(d => d.filter(x => x.id !== id));
-  const updPyra = useCallback((id, k, v) => setPyraEntries(ds => ds.map(d => (d.id === id ? { ...d, [k]: v } : d))), []);
-
+  // Sync split helper from dcaEntries when opening
   const openSplitHelper = () => {
     if (!splitMode) {
-      const prices = dcaEntries.map(e => e.price).filter(p => n(p) > 0);
+      // Pull prices and total from current dcaEntries
+      const prices = dcaEntries.map((e) => e.price).filter((p) => n(p) > 0);
       const total = dcaEntries.reduce((a, e) => a + n(e.margin), 0);
-      if (prices.length > 0) { setSplitPrices(prices.length > 0 ? prices : ["", "", ""]); if (total > 0) setSplitTotal(String(Math.round(total * 100) / 100)); }
+      if (prices.length > 0) {
+        setSplitPrices(prices.length > 0 ? prices : ["", "", ""]);
+        if (total > 0) setSplitTotal(String(Math.round(total * 100) / 100));
+      }
     }
     setSplitMode(!splitMode);
   };
-  const addSplitPrice = () => setSplitPrices(p => [...p, ""]);
-  const rmSplitPrice = (idx) => setSplitPrices(p => p.filter((_, i) => i !== idx));
-  const updSplitPrice = (idx, v) => setSplitPrices(p => p.map((x, i) => (i === idx ? v : x)));
+  const addSplitPrice = () => setSplitPrices((p) => [...p, ""]);
+  const rmSplitPrice = (idx) => setSplitPrices((p) => p.filter((_, i) => i !== idx));
+  const updSplitPrice = (idx, v) => setSplitPrices((p) => p.map((x, i) => (i === idx ? v : x)));
+
+  // CRUD
+  const addPos = () => setPositions((p) => [...p, mkPos()]);
+  const rmPos = (id) => {
+    setPositions((p) => p.filter((x) => x.id !== id));
+    if (selId === id) { setSelId(null); setDcaEntries([mkDCA()]); }
+    if (hedgeId === id) { setHedgeId(null); }
+  };
+  const updPos = useCallback((id, k, v) =>
+    setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, [k]: v } : p))), []);
+  const selectPos = (id) => {
+    setSelId((prev) => (prev === id ? null : id));
+    setDcaEntries([mkDCA()]);
+    setRevPrice(""); setRevTarget("");
+    setDcaMode("sim");
+    setHedgeId(null);
+    // Clear pyra when switching to DCA mode
+    setPyraMode(false); setPyraLockedId(null); setPyraCounterId(null);
+  };
+
+  // ── Hedge (헷지) selection ──
+  const selectHedge = (id) => {
+    if (hedgeId === id) { setHedgeId(null); return; }
+    setSelId(null);
+    setPyraMode(false); setPyraLockedId(null); setPyraCounterId(null);
+    setHedgeId(id);
+    // 현재가 자동 채움 + 실시간 ON
+    const targetPos = positions.find(p => p.id === id);
+    const cp = targetPos ? n(coinPrices[targetPos.coin] || "") : 0;
+    setHedgeEntry(cp > 0 ? String(cp) : "");
+    setHedgeLive(true);
+    setHedgeMargin(""); setHedgeLev("");
+  };
+
+  // ── Pyramiding (불타기) selection ──
+  // User clicks 🔥 on the WINNING position (the one they want to add to)
+  // The opposite position (the losing one) gets locked
+  const selectPyra = (pyraTargetId) => {
+    // If already in pyra mode for this position, toggle off
+    if (pyraMode && pyraCounterId === pyraTargetId) {
+      setPyraMode(false); setPyraLockedId(null); setPyraCounterId(null);
+      return;
+    }
+    // Clear DCA selection
+    setSelId(null);
+    setHedgeId(null);
+
+    const target = positions.find((p) => p.id === pyraTargetId);
+    if (!target) return;
+
+    // pyraCounterId = the winning position (불타기 대상, the one user clicked)
+    // pyraLockedId = the losing position (물린 포지션, opposite direction, auto-detected)
+    setPyraMode(true);
+    setPyraCounterId(pyraTargetId);
+    setPyraSubMode("sim");
+    setPyraEntries([mkPyra()]);
+    setPyraRevPrice(""); setPyraRevTarget("");
+    setPyraSplitMode(false);
+
+    // Auto-detect the locked (losing) position — opposite direction, same coin
+    const lockedDir = target.dir === "long" ? "short" : "long";
+    const candidates = positions.filter((p) => p.id !== pyraTargetId && p.dir === lockedDir && p.coin === target.coin);
+    if (candidates.length === 1) {
+      setPyraLockedId(candidates[0].id);
+    } else {
+      setPyraLockedId(null); // user picks or none
+    }
+  };
+
+  const addDCA = () => setDcaEntries((d) => [...d, mkDCA()]);
+  const rmDCA = (id) => setDcaEntries((d) => d.filter((x) => x.id !== id));
+  const updDCA = useCallback((id, k, v) =>
+    setDcaEntries((ds) => ds.map((d) => (d.id === id ? { ...d, [k]: v } : d))), []);
+
+  // Pyra CRUD
+  const addPyra = () => setPyraEntries((d) => [...d, mkPyra()]);
+  const rmPyra = (id) => setPyraEntries((d) => d.filter((x) => x.id !== id));
+  const updPyra = useCallback((id, k, v) =>
+    setPyraEntries((ds) => ds.map((d) => (d.id === id ? { ...d, [k]: v } : d))), []);
 
   const openPyraSplitHelper = () => {
     if (!pyraSplitMode) {
-      const prices = pyraEntries.map(e => e.price).filter(p => n(p) > 0);
+      const prices = pyraEntries.map((e) => e.price).filter((p) => n(p) > 0);
       const total = pyraEntries.reduce((a, e) => a + n(e.margin), 0);
-      if (prices.length > 0) { setPyraSplitPrices(prices); if (total > 0) setPyraSplitTotal(String(Math.round(total * 100) / 100)); }
+      if (prices.length > 0) {
+        setPyraSplitPrices(prices);
+        if (total > 0) setPyraSplitTotal(String(Math.round(total * 100) / 100));
+      }
     }
     setPyraSplitMode(!pyraSplitMode);
   };
-  const addPyraSplitPrice = () => setPyraSplitPrices(p => [...p, ""]);
-  const rmPyraSplitPrice = (idx) => setPyraSplitPrices(p => p.filter((_, i) => i !== idx));
-  const updPyraSplitPrice = (idx, v) => setPyraSplitPrices(p => p.map((x, i) => (i === idx ? v : x)));
+  const addPyraSplitPrice = () => setPyraSplitPrices((p) => [...p, ""]);
+  const rmPyraSplitPrice = (idx) => setPyraSplitPrices((p) => p.filter((_, i) => i !== idx));
+  const updPyraSplitPrice = (idx, v) => setPyraSplitPrices((p) => p.map((x, i) => (i === idx ? v : x)));
 
   /* ═══════════════════════════════════════════
      CORE CALCULATIONS
@@ -353,6 +981,9 @@ export default function SimV4() {
     const fee = n(feeRate) / 100;
     if (!wb) return null;
 
+    // ── Parse positions (코인별 현재가 적용) ──
+    // 마진 = 거래소에 표시된 값 그대로 (수수료 이미 차감됨)
+    // 수수료 차감은 추가 진입(DCA/불타기) 시에만 적용
     const parsed = positions.map((p) => {
       const ep = n(p.entryPrice);
       const mg = n(p.margin);
@@ -2099,213 +2730,722 @@ export default function SimV4() {
         input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none}
         ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:#2a2a3a;border-radius:2px}
         select{cursor:pointer}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
       `}</style>
 
       <div style={S.wrap}>
         {/* HEADER */}
         <header style={S.hdr}>
           <div style={S.hdrRow}>
-            <div style={{ ...S.hdrDot, background: priceConnected ? "#34d399" : "#6b7280", boxShadow: priceConnected ? "0 0 8px #34d39944" : "none" }} />
-            <span style={S.hdrBadge}>TAPBIT SYNC · CROSS MARGIN</span>
+            <div style={{ ...S.hdrDot, background: activeColor, boxShadow: `0 0 8px ${activeColor}44` }} />
+            <span style={S.hdrBadge}>CROSS MARGIN · FUTURES</span>
           </div>
-          <h1 style={S.hdrTitle}>COINSTEP PRO</h1>
+          <h1 style={S.hdrTitle}>POSITION LAB</h1>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
-            <div style={{ fontSize: 10, color: "#4b5563", fontFamily: "'DM Sans'", display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{
-                display: "inline-block", width: 5, height: 5, borderRadius: "50%",
-                background: priceConnected ? "#34d399" : "#6b7280",
-              }} />
-              <span style={{ color: priceConnected ? "#34d399" : "#6b7280" }}>
-                {priceConnected ? "실시간" : hasAnyPrice ? "실시간" : "가격 대기"}
-              </span>
-              {lastSyncTime && (
-                <span style={{ color: "#334155" }}>
-                  · {(() => {
-                    const sec = Math.floor((Date.now() - lastSyncTime) / 1000);
-                    if (sec < 60) return `동기화 ${sec}초 전`;
-                    if (sec < 300) return `동기화 ${Math.floor(sec / 60)}분 전`;
-                    return "동기화됨";
-                  })()}
+            <p style={S.hdrSub}></p>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {saveStatus === "saved" && (
+                <span style={{ fontSize: 9, color: "#34d399", fontFamily: "'DM Sans'" }}>
+                  💾 저장됨
                 </span>
               )}
+              {saveStatus === "saving" && (
+                <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "'DM Sans'" }}>
+                  저장 중...
+                </span>
+              )}
+              <button onClick={() => setGuideOpen(true)} style={{
+                fontSize: 9, padding: "3px 8px", borderRadius: 4,
+                border: "1px solid #1e1e2e", background: "transparent",
+                color: "#4b5563", cursor: "pointer", fontFamily: "'DM Sans'",
+              }} title="사용 가이드">
+                ?
+              </button>
+              <button onClick={handleReset} style={{
+                fontSize: 9, padding: "3px 8px", borderRadius: 4,
+                border: "1px solid #1e1e2e", background: "transparent",
+                color: "#4b5563", cursor: "pointer", fontFamily: "'DM Sans'",
+              }} title="현재 프로필 데이터 초기화">
+                초기화
+              </button>
             </div>
           </div>
         </header>
 
-        {/* ── 유저 미선택: 유저 리스트 ── */}
-        {!selectedUser && (
-          <div>
-            {parsedUsers.length === 0 ? (
+        {/* ══════ PROFILE SELECTOR BAR ══════ */}
+        <div ref={profileDropdownRef} style={{
+          position: "relative", marginBottom: 16,
+          padding: "10px 14px", borderRadius: 10,
+          background: "#08080f", border: `1px solid ${activeColor}33`,
+          fontFamily: "'DM Sans'",
+        }}>
+          {/* 상단: 셀렉터 + 액션 버튼 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* 프로필 선택 버튼 */}
+            <button
+              onClick={() => setProfileDropdownOpen(!profileDropdownOpen)}
+              style={{
+                flex: 1, display: "flex", alignItems: "center", gap: 8,
+                padding: "8px 12px", borderRadius: 8,
+                background: profileDropdownOpen ? "#0a0a18" : "transparent",
+                border: `1px solid ${profileDropdownOpen ? activeColor + "44" : "#1e1e2e"}`,
+                cursor: "pointer", transition: "all 0.15s",
+              }}
+            >
               <div style={{
-                padding: 40, textAlign: "center", borderRadius: 12,
-                background: "linear-gradient(135deg, #0a0e1a 0%, #080c16 100%)",
-                border: "1px solid #0ea5e922",
-              }}>
-                <div style={{ fontSize: 32, marginBottom: 12 }}>📡</div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0", marginBottom: 8, fontFamily: "'DM Sans'" }}>
-                  Tapbit 동기화 대기 중
-                </div>
-                <div style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.8, fontFamily: "'DM Sans'", marginBottom: 16 }}>
-                  확장에서 동기화 완료 후 아래 버튼을 눌러주세요
-                </div>
-                <button
-                  onClick={() => window.postMessage({ type: "CALC_READ_DATA" }, "*")}
-                  style={{
-                    padding: "12px 32px", fontSize: 14, fontWeight: 700, borderRadius: 10,
-                    border: "1px solid #34d39944", background: "#34d39915",
-                    color: "#34d399", cursor: "pointer", fontFamily: "'DM Sans'",
-                    transition: "all 0.15s", letterSpacing: 0.5,
+                width: 8, height: 8, borderRadius: "50%",
+                background: activeColor, boxShadow: `0 0 6px ${activeColor}66`,
+                flexShrink: 0,
+              }} />
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", textAlign: "left", flex: 1 }}>
+                {activeProfile?.name || "프로필 선택"}
+              </span>
+              <span style={{ fontSize: 10, color: "#4b5563", transform: profileDropdownOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>▼</span>
+            </button>
+            {/* 새 프로필 */}
+            <button
+              onClick={() => {
+                setProfileModalName("");
+                setProfileModalColor(PROFILE_COLORS[(profiles.length) % PROFILE_COLORS.length].id);
+                setProfileModal("create");
+                setProfileDropdownOpen(false);
+              }}
+              style={{
+                padding: "8px 12px", fontSize: 11, fontWeight: 600, borderRadius: 8,
+                border: "1px solid #1e1e2e", background: "transparent",
+                color: "#0ea5e9", cursor: "pointer", whiteSpace: "nowrap",
+              }}
+            >＋ 새 프로필</button>
+          </div>
+
+          {/* 드롭다운 목록 */}
+          {profileDropdownOpen && profiles.length > 0 && (
+            <div style={{
+              position: "absolute", top: "100%", left: 0, right: 0, zIndex: 100,
+              marginTop: 4, padding: 6, borderRadius: 10,
+              background: "#0c0c16", border: "1px solid #1e1e2e",
+              boxShadow: "0 12px 40px #00000088",
+              maxHeight: 320, overflowY: "auto",
+            }}>
+              {[...profiles].sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0)).map((p) => {
+                const pColor = PROFILE_COLORS.find(c => c.id === p.colorId)?.hex || "#34d399";
+                const isActive = p.id === activeProfileId;
+                return (
+                  <div key={p.id} style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    padding: "10px 12px", borderRadius: 8, cursor: "pointer",
+                    background: isActive ? `${pColor}12` : "transparent",
+                    border: isActive ? `1px solid ${pColor}33` : "1px solid transparent",
+                    marginBottom: 2, transition: "all 0.15s",
                   }}
-                  onMouseEnter={(e) => { e.target.style.background = "#34d39925"; e.target.style.borderColor = "#34d39966"; }}
-                  onMouseLeave={(e) => { e.target.style.background = "#34d39915"; e.target.style.borderColor = "#34d39944"; }}
-                >
-                  📥 Tapbit 데이터 불러오기
-                </button>
-                <div style={{ fontSize: 10, color: "#4b5563", marginTop: 12, fontFamily: "'DM Sans'" }}>
-                  확장 팝업에서 먼저 🔄 동기화를 실행하세요
-                </div>
-                {syncMsg && (
-                  <div style={{
-                    marginTop: 12, padding: "8px 12px", borderRadius: 8,
-                    background: "#f59e0b08", border: "1px solid #f59e0b22",
-                    fontSize: 11, color: "#f59e0b", fontFamily: "'DM Sans'", textAlign: "left",
-                  }}>
-                    ⚠ {syncMsg}
+                    onClick={() => !isActive && switchProfile(p.id)}
+                    onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "#ffffff06"; }}
+                    onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                  >
+                    <div style={{
+                      width: 8, height: 8, borderRadius: "50%",
+                      background: pColor, boxShadow: `0 0 6px ${pColor}44`,
+                      flexShrink: 0,
+                    }} />
+                    <span style={{ flex: 1, fontSize: 12, fontWeight: isActive ? 600 : 400, color: isActive ? "#f1f5f9" : "#94a3b8" }}>
+                      {p.name}
+                    </span>
+                    {isActive && <span style={{ fontSize: 9, color: pColor, fontWeight: 600 }}>활성</span>}
+                    {/* 편집/삭제 버튼 */}
+                    <button onClick={(e) => {
+                      e.stopPropagation();
+                      setProfileModalName(p.name);
+                      setProfileModalColor(p.colorId || "emerald");
+                      setProfileModal("rename-" + p.id);
+                      setProfileDropdownOpen(false);
+                    }} style={{
+                      padding: "2px 6px", fontSize: 10, border: "1px solid #1e1e2e",
+                      borderRadius: 4, background: "transparent", color: "#6b7280",
+                      cursor: "pointer",
+                    }}>✏️</button>
+                    {profiles.length > 1 && (
+                      <button onClick={(e) => {
+                        e.stopPropagation();
+                        setProfileDropdownOpen(false);
+                        deleteProfile(p.id);
+                      }} style={{
+                        padding: "2px 6px", fontSize: 10, border: "1px solid #1e1e2e",
+                        borderRadius: 4, background: "transparent", color: "#f87171",
+                        cursor: "pointer",
+                      }}>🗑</button>
+                    )}
                   </div>
-                )}
-              </div>
-            ) : (
-              <>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <Sec label={`유저 목록 (${parsedUsers.length}명)`} />
-                  <button
-                    onClick={() => window.postMessage({ type: "CALC_READ_DATA" }, "*")}
-                    style={{
-                      ...S.miniBtn, fontSize: 10, padding: "5px 12px",
-                      color: "#34d399", borderColor: "#34d39933",
-                    }}
-                  >🔄 새로고침</button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* 프로필 생성/편집 모달 */}
+          {profileModal && (
+            <div style={{
+              position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+              background: "#000000aa", zIndex: 200,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              padding: 20,
+            }} onClick={() => setProfileModal(null)}>
+              <div style={{
+                width: "100%", maxWidth: 360, padding: 24, borderRadius: 14,
+                background: "#0c0c16", border: "1px solid #1e1e2e",
+                boxShadow: "0 20px 60px #000000cc",
+                fontFamily: "'DM Sans'",
+              }} onClick={(e) => e.stopPropagation()}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: "#f1f5f9", marginBottom: 16 }}>
+                  {profileModal === "create" ? "새 프로필 만들기" : "프로필 편집"}
                 </div>
-                {parsedUsers.map(user => {
-                  const totalPnL = user.positions.reduce((a, p) => a + Number(p.unrealisedPnl || 0), 0);
-                  const totalMargin = user.positions.reduce((a, p) => a + Number(p.margin || 0), 0);
-                  const wb = Number(user.wallet);
-                  const equity = wb + totalPnL;
-                  const avgRoe = totalMargin > 0 ? (totalPnL / totalMargin) * 100 : 0;
-                  const riskColor = avgRoe < -200 ? "#f87171" : avgRoe < -100 ? "#f59e0b" : avgRoe < 0 ? "#94a3b8" : "#34d399";
-                  const riskIcon = avgRoe < -200 ? "🔴" : avgRoe < -100 ? "🟡" : avgRoe >= 0 ? "🟢" : "⚪";
-                  return (
-                    <div key={user.maskId} onClick={() => selectUser(user.maskId)} style={{
-                      ...S.card, cursor: "pointer", transition: "border-color 0.15s, background 0.15s",
-                      borderColor: "#1e1e2e", marginBottom: 8,
+                {/* 이름 입력 */}
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 6 }}>프로필 이름</div>
+                  <input
+                    type="text" value={profileModalName}
+                    onChange={(e) => setProfileModalName(e.target.value)}
+                    placeholder="예: 김민수 ETH 물타기"
+                    maxLength={30}
+                    style={{
+                      ...S.inp, fontSize: 13,
                     }}
-                      onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#0ea5e944"; e.currentTarget.style.background = "#060a14"; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#1e1e2e"; e.currentTarget.style.background = "#08080f"; }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span>{riskIcon}</span>
-                          <span style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", fontFamily: "'DM Sans'" }}>{user.label}</span>
-                        </div>
-                        <span style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8", fontFamily: "'IBM Plex Mono'" }}>
-                          {fmt(wb, 0)} USDT
-                        </span>
-                      </div>
-                      <div style={{ display: "flex", gap: 12, fontSize: 11, color: "#6b7280", fontFamily: "'DM Sans'" }}>
-                        <span>포지션 {user.positions.length}개</span>
-                        <span>{[...new Set(user.positions.map(p => p.coin))].join("/")}</span>
-                        <span>{[...new Set(user.positions.map(p => p.dir === "long" ? "롱" : "숏"))].join("+")}</span>
-                        <span style={{ color: riskColor, fontWeight: 600 }}>
-                          PnL {fmtS(totalPnL)} ({fmtS(avgRoe)}%)
-                        </span>
-                      </div>
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        if (profileModal === "create") {
+                          createProfile(profileModalName.trim(), profileModalColor);
+                        } else {
+                          const pid = profileModal.replace("rename-", "");
+                          renameProfile(pid, profileModalName.trim(), profileModalColor);
+                        }
+                        setProfileModal(null);
+                      }
+                    }}
+                  />
+                </div>
+                {/* 색상 선택 */}
+                <div style={{ marginBottom: 18 }}>
+                  <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>색상 태그</div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {PROFILE_COLORS.map((c) => (
+                      <button key={c.id} onClick={() => setProfileModalColor(c.id)} style={{
+                        width: 32, height: 32, borderRadius: 8,
+                        background: profileModalColor === c.id ? `${c.hex}22` : "transparent",
+                        border: `2px solid ${profileModalColor === c.id ? c.hex : "#1e1e2e"}`,
+                        cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                        transition: "all 0.15s",
+                      }}>
+                        <div style={{
+                          width: 14, height: 14, borderRadius: "50%",
+                          background: c.hex,
+                          boxShadow: profileModalColor === c.id ? `0 0 8px ${c.hex}66` : "none",
+                        }} />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {/* 액션 버튼 */}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => setProfileModal(null)} style={{
+                    flex: 1, padding: "10px 0", fontSize: 12, fontWeight: 600,
+                    borderRadius: 8, border: "1px solid #1e1e2e", background: "transparent",
+                    color: "#6b7280", cursor: "pointer",
+                  }}>취소</button>
+                  <button onClick={() => {
+                    const name = profileModalName.trim();
+                    if (profileModal === "create") {
+                      createProfile(name, profileModalColor);
+                    } else {
+                      const pid = profileModal.replace("rename-", "");
+                      renameProfile(pid, name, profileModalColor);
+                    }
+                    setProfileModal(null);
+                  }} style={{
+                    flex: 1, padding: "10px 0", fontSize: 12, fontWeight: 600,
+                    borderRadius: 8, border: `1px solid ${PROFILE_COLORS.find(c => c.id === profileModalColor)?.hex || "#34d399"}44`,
+                    background: `${PROFILE_COLORS.find(c => c.id === profileModalColor)?.hex || "#34d399"}15`,
+                    color: PROFILE_COLORS.find(c => c.id === profileModalColor)?.hex || "#34d399",
+                    cursor: "pointer",
+                  }}>{profileModal === "create" ? "생성" : "저장"}</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ══════ GUIDE MODAL ══════ */}
+        {guideOpen && (
+          <div style={{
+            position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+            background: "#000000cc", zIndex: 300,
+            display: "flex", alignItems: "flex-start", justifyContent: "center",
+            padding: 20, overflowY: "auto",
+          }} onClick={() => setGuideOpen(false)}>
+            <div style={{
+              width: "100%", maxWidth: 520, margin: "40px 0", padding: 0, borderRadius: 16,
+              background: "#0c0c16", border: "1px solid #1e1e2e",
+              boxShadow: "0 20px 60px #000000cc",
+              fontFamily: "'DM Sans'", overflow: "hidden",
+            }} onClick={(e) => e.stopPropagation()}>
+
+              {/* Header */}
+              <div style={{ padding: "24px 24px 16px", borderBottom: "1px solid #1e1e2e" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: "#f1f5f9", letterSpacing: -0.5 }}>POSITION LAB</div>
+                    <div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>사용 가이드</div>
+                  </div>
+                  <button onClick={() => setGuideOpen(false)} style={{
+                    background: "transparent", border: "none", color: "#4b5563",
+                    fontSize: 18, cursor: "pointer", padding: "0 4px", lineHeight: 1,
+                  }}>✕</button>
+                </div>
+                <div style={{
+                  fontSize: 9, color: "#4b5563", marginTop: 12, lineHeight: 1.6,
+                  padding: "8px 10px", borderRadius: 6, background: "#08080f", border: "1px solid #141420",
+                }}>
+                  본 도구는 공개된 수학 공식을 기반으로 한 포지션 계산기이며, 투자 자문·매매 권유·수익 보장의 목적이 아닙니다. 모든 거래 판단과 책임은 이용자 본인에게 있으며, 본 도구의 결과를 근거로 발생한 손실에 대해 제작자 및 제공자는 어떠한 책임도 지지 않습니다.
+                </div>
+              </div>
+
+              {/* Guide Content */}
+              <div style={{ padding: "16px 24px 24px" }}>
+
+                {/* 기능 1 */}
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, borderRadius: 6, background: "#0ea5e915", border: "1px solid #0ea5e933", color: "#0ea5e9", fontSize: 10, fontWeight: 800 }}>1</span>
+                    사용 가능 금액 실시간 확인
+                  </div>
+                  <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.7, paddingLeft: 28 }}>
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginBottom: 4 }}>언제 쓰나요?</div>
+                    사용 가능 금액을 확인할 때
+                    <div style={{ marginTop: 8 }}>
+                      <table style={{ width: "100%", fontSize: 10, borderCollapse: "collapse" }}>
+                        <tbody>
+                          {[
+                            ["총 미실현 PnL", "전체 포지션 손익 합계"],
+                            ["유효 잔고 (Equity)", "지갑 잔고 + 미실현 PnL"],
+                            ["사용 마진", "포지션에 묶인 마진 합계"],
+                            ["사용 가능", "지금 바로 쓸 수 있는 여유 금액"],
+                          ].map(([k, v], i) => (
+                            <tr key={i} style={{ borderBottom: "1px solid #141420" }}>
+                              <td style={{ padding: "5px 8px", color: "#9ca3af", whiteSpace: "nowrap" }}>{k}</td>
+                              <td style={{ padding: "5px 8px", color: "#6b7280" }}>{v}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
-                  );
-                })}
-              </>
-            )}
+                  </div>
+                </div>
+
+                <div style={{ height: 1, background: "#1e1e2e", margin: "0 0 20px 28px" }} />
+
+                {/* 기능 2 */}
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, borderRadius: 6, background: "#0ea5e915", border: "1px solid #0ea5e933", color: "#0ea5e9", fontSize: 10, fontWeight: 800 }}>2</span>
+                    목표 사용 가능 금액
+                  </div>
+                  <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.7, paddingLeft: 28 }}>
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginBottom: 4 }}>언제 쓰나요?</div>
+                    예시: 현재 사용가능 금액이 300 USDT밖에 없는데<br />
+                    "추가 진입하려면 1,500 USDT가 필요한데, 가격이 얼마나 올라야 확보할 수 있지?" 할 때
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginTop: 10, marginBottom: 4 }}>사용 방법</div>
+                    목표 사용 가능 금액 입력 → 3가지 달성 방법 자동 표시
+                    <div style={{ marginTop: 8 }}>
+                      <table style={{ width: "100%", fontSize: 10, borderCollapse: "collapse" }}>
+                        <tbody>
+                          {[
+                            ["① 가격 변동", "가격이 얼마가 되면 목표 금액에 도달하는지"],
+                            ["② 부분 청산", "어떤 포지션을 몇 % 닫으면 확보 가능한지"],
+                            ["③ 추가 입금", "얼마를 입금하면 즉시 달성되는지"],
+                          ].map(([k, v], i) => (
+                            <tr key={i} style={{ borderBottom: "1px solid #141420" }}>
+                              <td style={{ padding: "5px 8px", color: "#9ca3af", whiteSpace: "nowrap" }}>{k}</td>
+                              <td style={{ padding: "5px 8px", color: "#6b7280" }}>{v}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ height: 1, background: "#1e1e2e", margin: "0 0 20px 28px" }} />
+
+                {/* 기능 3 */}
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, borderRadius: 6, background: "#0ea5e915", border: "1px solid #0ea5e933", color: "#0ea5e9", fontSize: 10, fontWeight: 800 }}>3</span>
+                    롱숏 동시청산 시뮬레이션
+                  </div>
+                  <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.7, paddingLeft: 28 }}>
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginBottom: 4 }}>언제 쓰나요?</div>
+                    같은 코인에 롱과 숏을 동시에 보유 중일 때, 둘 다 청산하면 최종 손익이 얼마인지 확인할 때
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginTop: 10, marginBottom: 4 }}>사용 방법</div>
+                    같은 코인에 롱·숏 포지션이 있으면 자동 표시됨<br />
+                    → 각 포지션의 청산 비율 설정 (25% / 50% / 75% / 100%)<br />
+                    → 현재가 기준 순손익, 본전가, 가격별 시나리오표 확인
+                  </div>
+                </div>
+
+                <div style={{ height: 1, background: "#1e1e2e", margin: "0 0 20px 28px" }} />
+
+                {/* 기능 4 */}
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, borderRadius: 6, background: "#0ea5e915", border: "1px solid #0ea5e933", color: "#0ea5e9", fontSize: 10, fontWeight: 800 }}>4</span>
+                    동시청산 목표 익절가
+                  </div>
+                  <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.7, paddingLeft: 28 }}>
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginBottom: 4 }}>언제 쓰나요?</div>
+                    "롱숏 동시에 닫아서 1,000 USDT 익절하고 싶은데, 가격이 얼마가 되어야 하지?" 할 때
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginTop: 10, marginBottom: 4 }}>사용 방법</div>
+                    동시청산 화면 내 목표 금액 입력 (예: 1000 USDT)<br />
+                    → 익절가 자동 계산 (현재가 대비 % 포함)
+                  </div>
+                </div>
+
+                <div style={{ height: 1, background: "#1e1e2e", margin: "0 0 20px 28px" }} />
+
+                {/* 기능 5 */}
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, borderRadius: 6, background: "#0ea5e915", border: "1px solid #0ea5e933", color: "#0ea5e9", fontSize: 10, fontWeight: 800 }}>5</span>
+                    한쪽 포지션 부분청산 시뮬레이션
+                  </div>
+                  <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.7, paddingLeft: 28 }}>
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginBottom: 4 }}>언제 쓰나요?</div>
+                    물린 포지션의 일부를 손절해서 마진을 확보하거나, 리스크를 줄이고 싶을 때
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginTop: 10, marginBottom: 4 }}>사용 방법</div>
+                    포지션 카드 → 물타기 → <span style={{ color: "#e2e8f0", fontWeight: 600 }}>부분 청산</span> 선택<br />
+                    → 손절 비율 설정 (25% / 50% / 75% / 100%)<br />
+                    → 실현 손익, Before/After 비교, 손절 후 사용 가능 금액 확인
+                  </div>
+                </div>
+
+                <div style={{ height: 1, background: "#1e1e2e", margin: "0 0 20px 28px" }} />
+
+                {/* 기능 6 */}
+                <div style={{ marginBottom: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, borderRadius: 6, background: "#0ea5e915", border: "1px solid #0ea5e933", color: "#0ea5e9", fontSize: 10, fontWeight: 800 }}>6</span>
+                    반대 포지션 진입 시 청산가 변화
+                  </div>
+                  <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.7, paddingLeft: 28 }}>
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginBottom: 4 }}>언제 쓰나요?</div>
+                    기존 포지션을 보유한 상태에서 반대 방향으로 포지션 진입했을 때, 강제 청산가가 어떻게 변하는지 미리 확인할 때
+                    <div style={{ color: "#9ca3af", fontWeight: 600, marginTop: 10, marginBottom: 4 }}>사용 방법</div>
+                    포지션 카드 → <span style={{ color: "#e2e8f0", fontWeight: 600 }}>헷지</span> 클릭<br />
+                    → 진입가, 투입금액, 레버리지 입력<br />
+                    → 강제 청산가 변화 (기존 → 헷지 후), 본전가, 동시청산 시 순손익 확인
+                  </div>
+                </div>
+
+              </div>
+            </div>
           </div>
         )}
 
-        {/* ── 유저 선택됨: 상세 화면 ── */}
-        {selectedUser && (
-          <>
-            {/* 유저 헤더 + 뒤로가기 */}
-            <div style={{
-              display: "flex", alignItems: "center", gap: 10, marginBottom: 12,
-              padding: "10px 14px", borderRadius: 10,
-              background: "#08080f", border: "1px solid #34d39933",
-            }}>
-              <button onClick={() => setSelectedUserId(null)} style={{
-                padding: "6px 10px", fontSize: 11, borderRadius: 6,
-                border: "1px solid #1e1e2e", background: "transparent",
-                color: "#6b7280", cursor: "pointer", fontFamily: "'DM Sans'",
-              }}>← 목록</button>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0", fontFamily: "'DM Sans'" }}>
-                  {selectedUser.label}
-                </div>
-                <div style={{ fontSize: 10, color: "#4b5563", fontFamily: "'DM Sans'" }}>
-                  잔고 {fmt(Number(selectedUser.wallet), 0)} USDT · 포지션 {selectedUser.positions.length}개
-                </div>
+        {/* TAB NAVIGATION */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
+          {[
+            { id: "sim", label: "물타기 · 불타기" },
+            { id: "hedge", label: "헷지 사이클" },
+          ].map((tab) => (
+            <button key={tab.id} onClick={() => setAppTab(tab.id)} style={{
+              flex: 1, padding: "12px 0", fontSize: 13, fontWeight: 700, borderRadius: 10,
+              border: `1px solid ${appTab === tab.id ? "#0ea5e944" : "#1e1e2e"}`,
+              background: appTab === tab.id ? "#0ea5e910" : "transparent",
+              color: appTab === tab.id ? "#0ea5e9" : "#4b5563",
+              cursor: "pointer", fontFamily: "'DM Sans'", transition: "all 0.15s",
+              letterSpacing: 0.5,
+            }}>{tab.label}</button>
+          ))}
+        </div>
+
+        {/* ══════ SIMULATOR TAB ══════ */}
+        {appTab === "sim" && (<>
+
+        {/* ① ACCOUNT & MARKET */}
+        <Sec label="계좌 & 시장" />
+        <div style={S.grid2}>
+          <Fld label="지갑 총 잔고 (USDT)">
+            <Inp value={wallet} onChange={setWallet} ph="거래소에서 확인" />
+          </Fld>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+              <div style={{ fontSize: 11, color: "#6b7280", fontFamily: "'DM Sans'" }}>
+                현재가 ($)
               </div>
-              {/* 현재가 표시 */}
-              {usedCoins.map(coin => (
-                <div key={coin} style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: 10, color: "#4b5563" }}>{coin}</div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: getCp(coin) > 0 ? "#e2e8f0" : "#4b5563", fontFamily: "'IBM Plex Mono'" }}>
-                    {getCp(coin) > 0 ? fmt(getCp(coin), getCp(coin) > 100 ? 2 : 4) : "—"}
+              <button onClick={() => {
+                if (priceMode === "live") { setPriceMode("manual"); }
+                else { setPriceMode("live"); setFetchError(false); }
+              }} style={{
+                ...S.miniBtn, fontSize: 9, padding: "2px 8px",
+                color: priceMode === "live" ? "#34d399" : "#6b7280",
+                borderColor: priceMode === "live" ? "#34d39933" : "#1e1e2e",
+              }}>
+                {priceMode === "live" ? "✎ 수동 전환" : "↻ 실시간"}
+              </button>
+            </div>
+            {usedCoins.map(coin => (
+              <div key={coin} style={{ display: "flex", gap: 6, marginBottom: 4, alignItems: "center" }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", width: 40, textAlign: "right", fontFamily: "'IBM Plex Mono'" }}>{coin}</span>
+                <input
+                  type="number"
+                  value={coinPrices[coin] || ""}
+                  placeholder={`${coin}/USDT`}
+                  readOnly={priceMode === "live"}
+                  onChange={(e) => setCp(coin, e.target.value)}
+                  style={{
+                    ...S.inp, flex: 1,
+                    borderColor: priceMode === "live" ? "#34d39944" : "#1e1e2e",
+                    background: priceMode === "live" ? "#060d08" : "#0a0a12",
+                    cursor: priceMode === "live" ? "default" : "text",
+                    transition: "color 0.3s, border-color 0.3s, background 0.3s",
+                  }}
+                />
+              </div>
+            ))}
+            <div style={{ fontSize: 9, marginTop: 3, color: "#4b5563", fontFamily: "'DM Sans'" }}>
+              {fetchError ? (
+                <span style={{ color: "#f87171" }}>연결 실패 · 수동 입력 모드</span>
+              ) : priceMode === "live" ? (
+                <span style={{ color: priceSourceColor, display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{
+                    display: "inline-block", width: 4, height: 4, borderRadius: "50%",
+                    background: priceSourceColor, boxShadow: `0 0 6px ${priceSourceColor}66`,
+                    animation: priceSource === "reconnecting" ? "pulse 1s infinite" : "none",
+                  }} />
+                  {priceSourceLabel}
+                </span>
+              ) : (
+                <span>수동 입력 중 · <span
+                  onClick={() => { setPriceMode("live"); setFetchError(false); }}
+                  style={{ color: "#0ea5e9", cursor: "pointer", textDecoration: "underline" }}
+                >실시간 전환</span></span>
+              )}
+            </div>
+            {/* 펀딩비 표시 */}
+            {priceMode === "live" && Object.keys(coinFundingRates).length > 0 && usedCoins.some(c => coinFundingRates[c]) && (
+              <div style={{ marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {usedCoins.map(coin => {
+                  const fr = Number(coinFundingRates[coin] || 0);
+                  if (!fr) return null;
+                  const frPct = (fr * 100).toFixed(4);
+                  const frColor = fr > 0 ? "#34d399" : fr < 0 ? "#f87171" : "#6b7280";
+                  return (
+                    <span key={coin} style={{ fontSize: 9, color: frColor, fontFamily: "'IBM Plex Mono'" }}>
+                      {coin} 펀딩 {fr > 0 ? "+" : ""}{frPct}%
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+        <div style={{ ...S.grid2, marginTop: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4, fontFamily: "'DM Sans'" }}>
+              거래소 강제 청산가 ($)
+            </div>
+            {usedCoins.map(coin => {
+              const isRef = calc?.calcRefCoin === coin;
+              const hasManual = !!(coinLiqPrices[coin] && n(coinLiqPrices[coin]) > 0);
+              const autoVal = calc?.autoLiqPrices?.[coin];
+              const hasAuto = !isRef && !hasManual && autoVal != null && autoVal > 0;
+              return (
+                <div key={coin} style={{ display: "flex", gap: 6, marginBottom: 4, alignItems: "center" }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", width: 40, textAlign: "right", fontFamily: "'IBM Plex Mono'" }}>{coin}</span>
+                  {hasAuto ? (
+                    <div style={{
+                      ...S.inp, flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between",
+                      background: "#060a10", borderColor: "#0ea5e922", cursor: "default",
+                    }}>
+                      <span style={{ color: "#0ea5e9", fontSize: 13, fontWeight: 500 }}>{fmt(autoVal, autoVal > 100 ? 2 : 4)}</span>
+                      <span style={{ fontSize: 9, color: "#0ea5e966", fontFamily: "'DM Sans'", whiteSpace: "nowrap", marginLeft: 8 }}>자동</span>
+                    </div>
+                  ) : (
+                    <Inp value={coinLiqPrices[coin] || ""} onChange={(v) => setLiqPrice(coin, v)} ph="거래소에서 확인" />
+                  )}
+                </div>
+              );
+            })}
+            {usedCoins.length > 1 && calc?.mmRate && (
+              <div style={{ fontSize: 9, color: "#0ea5e966", marginTop: 2, fontFamily: "'DM Sans'" }}>
+                💡 {calc.calcRefCoin} 청산가 기준으로 타 코인 자동 계산 (현재가 고정 가정)
+              </div>
+            )}
+          </div>
+          <Fld label="수수료율 (%)">
+            <Inp value={feeRate} onChange={setFeeRate} ph="0.04" />
+          </Fld>
+        </div>
+
+        {/* ② POSITIONS */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <Sec label="기존 포지션" />
+          {extensionReady && (
+            <button
+              onClick={syncFromTapbit}
+              disabled={syncLoading}
+              style={{
+                ...S.miniBtn, fontSize: 10, padding: "5px 12px",
+                color: syncLoading ? "#6b7280" : "#34d399",
+                borderColor: syncLoading ? "#1e1e2e" : "#34d39933",
+                background: syncLoading ? "transparent" : "#34d39908",
+                cursor: syncLoading ? "wait" : "pointer",
+              }}
+            >
+              {syncLoading ? "⏳ 불러오는 중..." : "📥 Tapbit에서 불러오기"}
+            </button>
+          )}
+        </div>
+
+        {/* Tapbit 동기화 에러 */}
+        {syncError && (
+          <div style={{
+            padding: 10, borderRadius: 8, marginBottom: 8,
+            background: "#f8717108", border: "1px solid #f8717122",
+            fontSize: 11, color: "#f87171", fontFamily: "'DM Sans'",
+          }}>
+            ⚠ {syncError}
+          </div>
+        )}
+
+        {/* Tapbit 유저 선택 드롭다운 */}
+        {tapbitUserDropdown && tapbitUsers.length > 0 && (
+          <div style={{
+            marginBottom: 10, padding: 12, borderRadius: 10,
+            background: "#060d08", border: "1px solid #34d39933",
+          }}>
+            <div style={{ fontSize: 10, color: "#34d399", fontWeight: 700, marginBottom: 8, fontFamily: "'DM Sans'", letterSpacing: 1 }}>
+              TAPBIT 유저 선택
+            </div>
+            {tapbitUsers.map(user => (
+              <button
+                key={user.maskId}
+                onClick={() => applyTapbitUser(user)}
+                style={{
+                  width: "100%", padding: "10px 12px", marginBottom: 4,
+                  background: "#08080f", border: "1px solid #1e1e2e", borderRadius: 8,
+                  color: "#cbd5e1", cursor: "pointer", textAlign: "left",
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                  fontFamily: "'DM Sans'", fontSize: 12, transition: "border-color 0.15s",
+                }}
+                onMouseEnter={(e) => e.target.style.borderColor = "#34d39944"}
+                onMouseLeave={(e) => e.target.style.borderColor = "#1e1e2e"}
+              >
+                <span>
+                  <span style={{ fontWeight: 600, color: "#e2e8f0" }}>{user.label}</span>
+                  <span style={{ color: "#4b5563", marginLeft: 8, fontSize: 10 }}>
+                    {user.positions.length}개 포지션
+                    {user.positions.length > 0 && ` · ${[...new Set(user.positions.map(p => p.coin))].join("/")}`}
+                    {user.positions.length > 0 && ` · ${[...new Set(user.positions.map(p => p.dir === "long" ? "롱" : "숏"))].join("+")}`}
+                  </span>
+                </span>
+                <span style={{ fontSize: 11, fontWeight: 600, color: "#94a3b8", fontFamily: "'IBM Plex Mono'" }}>
+                  {fmt(Number(user.wallet), 0)} USDT
+                </span>
+              </button>
+            ))}
+            <button
+              onClick={() => setTapbitUserDropdown(false)}
+              style={{ ...S.miniBtn, width: "100%", marginTop: 4, color: "#4b5563", fontSize: 10, padding: "6px 0" }}
+            >닫기</button>
+          </div>
+        )}
+
+        {/* 동기화 출처 표시 */}
+        {syncSource && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6, marginBottom: 8,
+            padding: "6px 10px", borderRadius: 6,
+            background: "#34d39908", border: "1px solid #34d39915",
+            fontSize: 10, color: "#34d399", fontFamily: "'DM Sans'",
+          }}>
+            🔄 {syncSource.label}에서 불러옴 · {new Date(syncSource.time).toLocaleTimeString("ko-KR")}
+          </div>
+        )}
+        {positions.map((pos, idx) => (
+          <Fragment key={pos.id}>
+            <PosCard pos={pos} idx={idx}
+              isSel={pos.id === selId}
+              isHedge={pos.id === hedgeId}
+              isPyraLocked={pyraMode && pos.id === pyraLockedId}
+              isPyraCounter={pyraMode && pos.id === pyraCounterId}
+              onSelect={() => selectPos(pos.id)}
+              onPyra={() => selectPyra(pos.id)}
+              onHedge={() => selectHedge(pos.id)}
+              onUpdate={updPos}
+              onRemove={() => rmPos(pos.id)}
+              canRemove={positions.length > 1}
+              cp={getCp(pos.coin)} fee={n(feeRate)/100} />
+            {/* 인라인 헷지 패널 */}
+            {pos.id === hedgeId && (
+              <HedgePanel
+                pos={pos} calc={calc}
+                hedgeEntry={hedgeEntry} setHedgeEntry={setHedgeEntry}
+                hedgeMargin={hedgeMargin} setHedgeMargin={setHedgeMargin}
+                hedgeLev={hedgeLev} setHedgeLev={setHedgeLev}
+                hedgeLive={hedgeLive} setHedgeLive={setHedgeLive}
+                getCp={getCp}
+              />
+            )}
+          </Fragment>
+        ))}
+        <button onClick={addPos} style={S.addBtn}>+ 포지션 추가</button>
+
+        {/* 온보딩 가이드: 필수값 미입력 시 표시 */}
+        {(!n(wallet) || !positions.some(p => n(p.entryPrice) > 0 && n(p.margin) > 0)) && (
+          <div style={{
+            marginTop: 16, padding: 20, borderRadius: 12,
+            background: "linear-gradient(135deg, #0a0e1a 0%, #080c16 100%)",
+            border: "1px solid #0ea5e922",
+          }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#0ea5e9", fontFamily: "'DM Sans'", marginBottom: 12 }}>
+              📋 시작하기
+            </div>
+            <div style={{ fontSize: 12, color: "#94a3b8", lineHeight: 1.8, fontFamily: "'DM Sans'" }}>
+              {extensionReady ? (
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10 }}>
+                  <span style={{ color: "#34d399", fontWeight: 700, minWidth: 16 }}>★</span>
+                  <div>
+                    <span><strong style={{ color: "#34d399" }}>Tapbit 확장 감지됨!</strong> 위의 <strong style={{ color: "#e2e8f0" }}>📥 Tapbit에서 불러오기</strong> 버튼을 누르면 자동으로 채워집니다</span>
+                    <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>※ Tapbit 관리자 페이지가 로그인된 상태여야 합니다</div>
                   </div>
                 </div>
-              ))}
+              ) : null}
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}>
+                <span style={{ color: !n(wallet) ? "#f59e0b" : "#34d399", fontWeight: 700, minWidth: 16 }}>{!n(wallet) ? "①" : "✓"}</span>
+                <span>거래소에서 <strong style={{ color: "#e2e8f0" }}>지갑 총 잔고</strong>를 확인하고 입력하세요</span>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}>
+                <span style={{ color: !positions.some(p => n(p.entryPrice) > 0 && n(p.margin) > 0) ? "#f59e0b" : "#34d399", fontWeight: 700, minWidth: 16 }}>
+                  {!positions.some(p => n(p.entryPrice) > 0 && n(p.margin) > 0) ? "②" : "✓"}
+                </span>
+                <div>
+                  <span>보유 중인 <strong style={{ color: "#e2e8f0" }}>모든 포지션</strong>의 <strong style={{ color: "#e2e8f0" }}>오픈 균일가</strong>, <strong style={{ color: "#e2e8f0" }}>마진</strong>, <strong style={{ color: "#e2e8f0" }}>레버리지</strong>를 입력하세요</span>
+                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>※ 교차 마진에서는 모든 포지션이 청산가에 영향을 줍니다</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}>
+                <span style={{ color: !Object.values(coinLiqPrices).some(v => n(v) > 0) ? "#f59e0b" : "#34d399", fontWeight: 700, minWidth: 16 }}>
+                  {!Object.values(coinLiqPrices).some(v => n(v) > 0) ? "③" : "✓"}
+                </span>
+                <div>
+                  <span>거래소에 표시된 <strong style={{ color: "#e2e8f0" }}>강제 청산가</strong>를 입력하세요</span>
+                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>※ 미입력 시 청산가 예측 기능이 비활성화됩니다</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                <span style={{ color: hasAnyPrice ? "#34d399" : "#f59e0b", fontWeight: 700, minWidth: 16 }}>{hasAnyPrice ? "✓" : "④"}</span>
+                <span style={{ color: hasAnyPrice ? "#94a3b8" : "#6b7280" }}>현재가에서 <strong style={{ color: hasAnyPrice ? "#94a3b8" : "#e2e8f0" }}>실시간 전환</strong>을 누르면 Tapbit markPrice가 자동 반영됩니다</span>
+              </div>
             </div>
-
-            {/* TAB NAVIGATION */}
-            <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
-              {[
-                { id: "sim", label: "물타기 · 불타기" },
-                { id: "hedge", label: "헷지 사이클" },
-              ].map((tab) => (
-                <button key={tab.id} onClick={() => setAppTab(tab.id)} style={{
-                  flex: 1, padding: "12px 0", fontSize: 13, fontWeight: 700, borderRadius: 10,
-                  border: `1px solid ${appTab === tab.id ? "#0ea5e944" : "#1e1e2e"}`,
-                  background: appTab === tab.id ? "#0ea5e910" : "transparent",
-                  color: appTab === tab.id ? "#0ea5e9" : "#4b5563",
-                  cursor: "pointer", fontFamily: "'DM Sans'", transition: "all 0.15s",
-                  letterSpacing: 0.5,
-                }}>{tab.label}</button>
-              ))}
-            </div>
-
-            {/* ══════ SIMULATOR TAB ══════ */}
-            {appTab === "sim" && (<>
-
-            {/* ② POSITIONS (읽기 전용) */}
-            <Sec label="포지션" />
-            {positions.map((pos, idx) => (
-              <Fragment key={pos.id}>
-                <PosCard pos={pos} idx={idx}
-                  isSel={pos.id === selId}
-                  isHedge={pos.id === hedgeId}
-                  isPyraLocked={pyraMode && pos.id === pyraLockedId}
-                  isPyraCounter={pyraMode && pos.id === pyraCounterId}
-                  onSelect={() => selectPos(pos.id)}
-                  onPyra={() => selectPyra(pos.id)}
-                  onHedge={() => selectHedge(pos.id)}
-                  cp={getCp(pos.coin)} fee={n(feeRate)/100} />
-                {pos.id === hedgeId && (
-                  <HedgePanel
-                    pos={pos} calc={calc}
-                    hedgeEntry={hedgeEntry} setHedgeEntry={setHedgeEntry}
-                    hedgeMargin={hedgeMargin} setHedgeMargin={setHedgeMargin}
-                    hedgeLev={hedgeLev} setHedgeLev={setHedgeLev}
-                    hedgeLive={hedgeLive} setHedgeLive={setHedgeLive}
-                    getCp={getCp}
-                  />
-                )}
-              </Fragment>
-            ))}
+          </div>
+        )}
 
         {/* ③ ACCOUNT SUMMARY */}
         {calc && hasAnyPrice && (
@@ -3814,31 +4954,44 @@ export default function SimV4() {
         {/* ══════ HEDGE CYCLE TAB ══════ */}
         {appTab === "hedge" && (<>
 
-          {/* HC ① 계좌 & 시장 (자동) */}
+          {/* HC ① 계좌 & 시장 (공유) */}
           <Sec label="계좌 & 시장" />
           <div style={S.grid2}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4, fontFamily: "'DM Sans'" }}>지갑 총 잔고</div>
-              <div style={{ ...S.inp, display: "flex", alignItems: "center", background: "#060d08", borderColor: "#34d39933", cursor: "default" }}>
-                <span style={{ color: "#34d399", fontSize: 14, fontWeight: 600, fontFamily: "'IBM Plex Mono'" }}>{fmt(n(wallet), 0)}</span>
-                <span style={{ color: "#4b5563", fontSize: 10, marginLeft: 6 }}>USDT</span>
-              </div>
-            </div>
+            <Fld label="지갑 총 잔고 (USDT)">
+              <Inp value={wallet} onChange={setWallet} ph="10000" />
+            </Fld>
             <div style={{ flex: 1 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                 <div style={{ fontSize: 11, color: "#6b7280", fontFamily: "'DM Sans'" }}>
-                  현재가 — {primaryCoin}/USDT
+                  현재가 ($) — {primaryCoin}/USDT
                 </div>
+                <button onClick={() => {
+                  if (priceMode === "live") { setPriceMode("manual"); }
+                  else { setPriceMode("live"); setFetchError(false); }
+                }} style={{
+                  ...S.miniBtn, fontSize: 9, padding: "2px 8px",
+                  color: priceMode === "live" ? "#34d399" : "#6b7280",
+                  borderColor: priceMode === "live" ? "#34d39933" : "#1e1e2e",
+                }}>
+                  {priceMode === "live" ? "✎ 수동" : "↻ 실시간"}
+                </button>
               </div>
-              <div style={{ ...S.inp, display: "flex", alignItems: "center", background: "#060d08", borderColor: "#34d39933", cursor: "default" }}>
-                <span style={{ color: "#e2e8f0", fontSize: 14, fontWeight: 600, fontFamily: "'IBM Plex Mono'" }}>
-                  {getCp(primaryCoin) > 0 ? fmt(getCp(primaryCoin), getCp(primaryCoin) > 100 ? 2 : 4) : "—"}
-                </span>
-              </div>
-              <div style={{ fontSize: 9, marginTop: 3, color: priceConnected ? "#34d399" : "#6b7280", fontFamily: "'DM Sans'", display: "flex", alignItems: "center", gap: 4 }}>
-                <span style={{ display: "inline-block", width: 4, height: 4, borderRadius: "50%", background: priceConnected ? "#34d399" : "#6b7280" }} />
-                {priceConnected ? "실시간" : "가격 대기"}
-              </div>
+              <input type="number" value={coinPrices[primaryCoin] || ""} placeholder={`${primaryCoin}/USDT`}
+                readOnly={priceMode === "live"} onChange={(e) => setCp(primaryCoin, e.target.value)}
+                style={{ ...S.inp, flex: 1, borderColor: priceMode === "live" ? "#34d39944" : "#1e1e2e",
+                  background: priceMode === "live" ? "#060d08" : "#0a0a12",
+                  cursor: priceMode === "live" ? "default" : "text", transition: "color 0.3s" }} />
+              {priceMode === "live" && (
+                <div style={{ fontSize: 9, marginTop: 3, color: priceSourceColor, fontFamily: "'DM Sans'", display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ display: "inline-block", width: 4, height: 4, borderRadius: "50%", background: priceSourceColor }} />
+                  {priceSourceLabel}
+                  {coinFundingRates[primaryCoin] && (
+                    <span style={{ marginLeft: 6, color: Number(coinFundingRates[primaryCoin]) >= 0 ? "#34d399" : "#f87171", fontFamily: "'IBM Plex Mono'" }}>
+                      펀딩 {Number(coinFundingRates[primaryCoin]) > 0 ? "+" : ""}{(Number(coinFundingRates[primaryCoin]) * 100).toFixed(4)}%
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -3864,6 +5017,9 @@ export default function SimV4() {
             </Fld>
             <Fld label="킬 스위치 (%)">
               <Inp value={hcKillPct} onChange={setHcKillPct} ph="15" />
+            </Fld>
+            <Fld label="수수료율 (%)">
+              <Inp value={feeRate} onChange={setFeeRate} ph="0.04" />
             </Fld>
           </div>
 
@@ -4243,9 +5399,6 @@ export default function SimV4() {
           </div>
 
         </>)}
-
-          </>
-        )}
       </div>
     </div>
   );
@@ -4481,6 +5634,7 @@ function ResultBlock({ r, isLong, cp, mode, hasExLiq }) {
     </>
   );
 }
+
 /* ═══════════════════════════════════════════
    SUB COMPONENTS
    ═══════════════════════════════════════════ */
@@ -4928,8 +6082,8 @@ function HedgePanel({ pos, calc, hedgeEntry, setHedgeEntry, hedgeMargin, setHedg
   );
 }
 
-
-function PosCard({ pos, idx, isSel, isHedge, isPyraLocked, isPyraCounter, onSelect, onPyra, onHedge, cp, fee }) {
+function PosCard({ pos, idx, isSel, isHedge, isPyraLocked, isPyraCounter, onSelect, onPyra, onHedge, onUpdate, onRemove, canRemove, cp, fee }) {
+  const [showMoreCoins, setShowMoreCoins] = useState(false);
   const dirC = pos.dir === "long" ? "#34d399" : "#f87171";
   const ep = n(pos.entryPrice), mg = n(pos.margin), lev = n(pos.leverage);
   const notional = mg * lev;
@@ -4938,26 +6092,39 @@ function PosCard({ pos, idx, isSel, isHedge, isPyraLocked, isPyraCounter, onSele
   const sign = pos.dir === "long" ? 1 : -1;
   const pnl = cp > 0 && qty > 0 ? sign * (cp - ep) * qty : null;
   const roe = pnl != null && mg > 0 ? (pnl / mg) * 100 : null;
+  const isEmpty = ep === 0 && mg === 0;
 
   const borderColor = isHedge ? "#a78bfa" : isPyraCounter ? "#f59e0b" : isPyraLocked ? "#6b728044" : isSel ? "#0ea5e9" : "#1e1e2e";
   const bgColor = isHedge ? "#0e0a18" : isPyraCounter ? "#120e04" : isPyraLocked ? "#0a0a0e" : isSel ? "#060a14" : "#08080f";
 
+  const isPrimary = COINS_PRIMARY.includes(pos.coin);
+  const coinBtnStyle = (c) => ({
+    padding: "6px 0", fontSize: 11, fontWeight: 600, borderRadius: 6, cursor: "pointer",
+    border: `1px solid ${pos.coin === c ? "#0ea5e944" : "#1e1e2e"}`,
+    background: pos.coin === c ? "#0ea5e912" : "transparent",
+    color: pos.coin === c ? "#0ea5e9" : "#6b7280",
+    fontFamily: "'IBM Plex Mono'", transition: "all 0.15s",
+    flex: 1, minWidth: 0,
+  });
+
   return (
     <div style={{ ...S.card, borderColor, background: bgColor }}>
-      {/* 상단: 코인 + 방향 + 레버 + 버튼 */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 14, fontWeight: 800, color: "#e2e8f0", fontFamily: "'IBM Plex Mono'" }}>{pos.coin}</span>
+          <span style={{ fontSize: 11, color: "#4b5563" }}>#{idx + 1}</span>
           <span style={{
             fontSize: 11, fontWeight: 700, color: dirC, padding: "2px 8px", borderRadius: 4,
             background: pos.dir === "long" ? "#34d39912" : "#f8717112",
             border: `1px solid ${dirC}33`,
           }}>{pos.dir === "long" ? "LONG" : "SHORT"}</span>
-          <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "'IBM Plex Mono'" }}>x{lev}</span>
-          {isPyraLocked && <span style={{ fontSize: 10, color: "#6b7280", fontWeight: 600 }}>🔒 물린</span>}
-          {isPyraCounter && <span style={{ fontSize: 10, color: "#f59e0b", fontWeight: 600 }}>🔥 불타기</span>}
+          {isPyraLocked && (
+            <span style={{ fontSize: 10, color: "#6b7280", fontWeight: 600 }}>🔒 물린 포지션</span>
+          )}
+          {isPyraCounter && (
+            <span style={{ fontSize: 10, color: "#f59e0b", fontWeight: 600 }}>🔥 불타기 대상</span>
+          )}
         </div>
-        <div style={{ display: "flex", gap: 4 }}>
+        <div style={{ display: "flex", gap: 6 }}>
           <button onClick={onSelect} style={{
             ...S.miniBtn,
             background: isSel ? "#0ea5e915" : "transparent",
@@ -4976,35 +6143,87 @@ function PosCard({ pos, idx, isSel, isHedge, isPyraLocked, isPyraCounter, onSele
             borderColor: isHedge ? "#a78bfa44" : "#1e1e2e",
             color: isHedge ? "#a78bfa" : "#6b7280",
           }}>{isHedge ? "✓ 헷지" : "헷지"}</button>
+          {canRemove && <button onClick={onRemove} style={{ ...S.miniBtn, color: "#f87171", borderColor: "#1e1e2e" }}>삭제</button>}
         </div>
       </div>
 
-      {/* 데이터 행 */}
-      <div style={{ display: "flex", gap: 16, fontSize: 12, color: "#94a3b8", fontFamily: "'IBM Plex Mono'" }}>
-        <div>
-          <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "'DM Sans'" }}>진입가</span>
-          <div style={{ fontWeight: 600 }}>{fmt(ep, ep > 100 ? 2 : 4)}</div>
+      {/* 코인 선택: 버튼 그룹 */}
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ fontSize: 11, color: isEmpty ? "#94a3b8" : "#6b7280", marginBottom: 5, fontFamily: "'DM Sans'", fontWeight: isEmpty ? 600 : 400 }}>
+          {isEmpty ? "코인 선택" : "코인"}
         </div>
-        <div>
-          <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "'DM Sans'" }}>마진</span>
-          <div style={{ fontWeight: 600 }}>{fmt(mg, 0)}</div>
+        <div style={{ display: "flex", gap: 4 }}>
+          {COINS_PRIMARY.map((c) => (
+            <button key={c} onClick={() => { onUpdate(pos.id, "coin", c); setShowMoreCoins(false); }} style={coinBtnStyle(c)}>
+              {c}
+            </button>
+          ))}
+          <button
+            onClick={() => setShowMoreCoins(!showMoreCoins)}
+            style={{
+              ...coinBtnStyle("__more__"),
+              flex: "none", width: 40,
+              border: `1px solid ${(!isPrimary || showMoreCoins) ? "#0ea5e944" : "#1e1e2e"}`,
+              background: (!isPrimary || showMoreCoins) ? "#0ea5e912" : "transparent",
+              color: (!isPrimary || showMoreCoins) ? "#0ea5e9" : "#4b5563",
+              fontSize: 10,
+            }}
+          >
+            {!isPrimary ? pos.coin : "···"}
+          </button>
         </div>
-        <div>
-          <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "'DM Sans'" }}>포지션</span>
-          <div style={{ fontWeight: 600 }}>{fmt(liveNotional, 0)}</div>
-        </div>
-        {pos.liquidationPrice && n(pos.liquidationPrice) > 0 && (
-          <div>
-            <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "'DM Sans'" }}>청산가</span>
-            <div style={{ fontWeight: 600, color: "#f87171" }}>{fmt(n(pos.liquidationPrice), n(pos.liquidationPrice) > 100 ? 2 : 4)}</div>
+        {showMoreCoins && (
+          <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+            {COINS_MORE.map((c) => (
+              <button key={c} onClick={() => { onUpdate(pos.id, "coin", c); setShowMoreCoins(false); }} style={coinBtnStyle(c)}>
+                {c}
+              </button>
+            ))}
           </div>
         )}
       </div>
 
-      {/* PnL */}
-      {pnl != null && (
-        <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, color: pnl >= 0 ? "#34d399" : "#f87171", fontFamily: "'IBM Plex Mono'" }}>
-          PnL {fmtS(pnl)} ({fmtS(roe)}%)
+      {/* 방향 + 레버리지 */}
+      <div style={S.grid2}>
+        <Fld label="방향">
+          <div style={{ display: "flex", gap: 4 }}>
+            {["long", "short"].map((d) => (
+              <button key={d} onClick={() => onUpdate(pos.id, "dir", d)} style={{
+                flex: 1, padding: "8px 0", fontSize: 12, fontWeight: 600, borderRadius: 6, cursor: "pointer",
+                border: `1px solid ${pos.dir === d ? (d === "long" ? "#34d39933" : "#f8717133") : "#1e1e2e"}`,
+                background: pos.dir === d ? (d === "long" ? "#34d39910" : "#f8717110") : "transparent",
+                color: pos.dir === d ? (d === "long" ? "#34d399" : "#f87171") : "#4b5563",
+                fontFamily: "'DM Sans'",
+              }}>{d === "long" ? "롱" : "숏"}</button>
+            ))}
+          </div>
+        </Fld>
+        <Fld label="레버리지">
+          <select value={pos.leverage} onChange={(e) => onUpdate(pos.id, "leverage", Number(e.target.value))} style={S.sel}>
+            {LEV_PRESETS.map((l) => <option key={l} value={l}>x{l}</option>)}
+          </select>
+        </Fld>
+      </div>
+      <div style={{ ...S.grid2, marginTop: 8 }}>
+        <Fld label="평균 진입가 ($)">
+          <PriceInp value={pos.entryPrice} onChange={(v) => onUpdate(pos.id, "entryPrice", v)} ph="거래소에서 확인" cp={cp} mode="entry" />
+        </Fld>
+        <Fld label="표시 마진 (USDT)">
+          <Inp value={pos.margin} onChange={(v) => onUpdate(pos.id, "margin", v)} ph="거래소에서 확인" />
+          <InputCalc pos={pos} ep={ep} lev={lev} fee={fee} onUpdate={onUpdate} />
+        </Fld>
+      </div>
+      {ep > 0 && mg > 0 && (
+        <div style={S.autoRow}>
+          {pnl != null && (
+            <span style={{ color: pnl >= 0 ? "#34d399" : "#f87171" }}>
+              PnL: {fmtS(pnl)} ({fmtS(roe)}%)
+            </span>
+          )}
+          <span style={{ color: "#4b5563" }}>
+            포지션: {fmt(liveNotional, 0)}{cp > 0 && liveNotional !== notional ? ` (진입 시 ${fmt(notional, 0)})` : ""}
+          </span>
+          {qty > 0 && <span style={{ color: "#4b5563" }}>수량: {fmt(qty, 4)}</span>}
         </div>
       )}
     </div>

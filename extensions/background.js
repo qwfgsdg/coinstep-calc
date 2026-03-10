@@ -8,6 +8,7 @@
 let state = "IDLE";
 let positionsTabId = null;
 let accountsTabId = null;
+let historiesTabId = null;
 let autoRefreshTimer = null;
 let autoRefreshEnabled = false;
 const AUTO_REFRESH_INTERVAL = 30000; // 30초
@@ -19,6 +20,7 @@ let pending = {
   profile: null,
   timeout: null,
 };
+let isFeeQuerying = false; // fee query 중 DATA_HISTORIES 저장 방지
 
 // ── 메시지 핸들러 ──
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -61,6 +63,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         profile: result?.tapbitData?.profile || null,
         positionsTabId,
         accountsTabId,
+        historiesTabId,
       });
     });
     return true; // 비동기
@@ -86,9 +89,196 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
-  if (msg.type === "DATA_AUTH") {
-    // auth는 로그인 여부 확인용으로만 사용
+  // histories 데이터 저장 (거래내역 — Coinstep에 전달용)
+  if (msg.type === "DATA_HISTORIES") {
+    const list = msg.data?.list || [];
+    if (isFeeQuerying) {
+      console.log("[BG] Histories received during fee query — skipping storage save (" + list.length + " items)");
+      return;
+    }
+    console.log("[BG] Histories received:", list.length, "items — saving to storage");
+    chrome.storage.local.set({
+      tapbitHistories: {
+        list: list,
+        lastSync: Date.now(),
+      },
+    }, () => {
+      console.log("[BG] Histories saved to chrome.storage.local");
+    });
     return;
+  }
+
+  if (msg.type === "DATA_AUTH") {
+    // auth 토큰 저장 (summary API 호출용)
+    chrome.storage.local.set({
+      tapbitAuth: { token: msg.auth, capturedAt: Date.now() },
+    });
+    console.log("[BG] Auth token saved");
+    return;
+  }
+
+  // ── 수수료 요약 API 호출 (페이지네이션 지원) ──
+  if (msg.type === "FETCH_SUMMARY") {
+    const { startTime, endTime, userType } = msg;
+    isFeeQuerying = true;
+
+    // Tapbit historyOrders 탭 찾기
+    const findTapbitTab = () => {
+      return new Promise((resolve) => {
+        const knownTab = historiesTabId || positionsTabId || accountsTabId;
+        if (knownTab) {
+          chrome.tabs.get(knownTab, (tab) => {
+            if (chrome.runtime.lastError || !tab) {
+              chrome.tabs.query({ url: "https://agent.tapbit.com/*" }, (tabs) => {
+                resolve(tabs && tabs.length > 0 ? tabs.find(t => t.status === "complete") || tabs[0] : null);
+              });
+            } else {
+              resolve(tab);
+            }
+          });
+        } else {
+          chrome.tabs.query({ url: "https://agent.tapbit.com/*" }, (tabs) => {
+            resolve(tabs && tabs.length > 0 ? tabs.find(t => t.status === "complete") || tabs[0] : null);
+          });
+        }
+      });
+    };
+
+    findTapbitTab().then((tab) => {
+      if (!tab) {
+        isFeeQuerying = false;
+        sendResponse({ error: "NO_TAPBIT_TAB: Tapbit 탭이 없습니다. 동기화를 실행하세요." });
+        return;
+      }
+
+      console.log("[BG] Fee query via dva dispatch: tab=" + tab.id, "dates:", startTime, "~", endTime);
+
+      // Tapbit 페이지에서 모든 페이지의 /histories를 fetch하여 tradeFee 합산
+      chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: "MAIN",
+        func: (st, et) => {
+          return new Promise((resolve) => {
+            const allItems = [];
+            let currentPage = 1;
+            let totalExpected = -1;
+            const PAGE_SIZE = 100;
+            const MAX_PAGES = 50; // 안전 제한 (최대 5000건)
+
+            const handler = (e) => {
+              if (e.source !== window || e.data?.type !== "__TAPBIT_HISTORIES__") return;
+
+              const data = e.data.data || {};
+              const list = data.list || [];
+              const page = data.page || {};
+
+              console.log("[Coinstep] Page " + currentPage + " received: " + list.length + " items, total=" + page.total);
+
+              // 아이템 누적
+              list.forEach(item => allItems.push(item));
+
+              // total 업데이트 (첫 페이지에서 설정)
+              if (totalExpected < 0 && page.total >= 0) {
+                totalExpected = page.total;
+              }
+
+              // 다음 페이지 필요 여부 확인 (total=-1인 API이므로 list.length로 판단)
+              if (list.length === PAGE_SIZE && currentPage < MAX_PAGES) {
+                // 다음 페이지 요청
+                currentPage++;
+                console.log("[Coinstep] Fetching page " + currentPage + " (total=" + totalExpected + ")");
+                window.g_app._store.dispatch({
+                  type: "lists/pageChange",
+                  payload: {
+                    id: "historyOrders",
+                    page: { current: currentPage },
+                  }
+                });
+              } else {
+                // 모든 페이지 수집 완료
+                window.removeEventListener("message", handler);
+                clearTimeout(timeout);
+
+                let totalFee = 0;
+                const traders = new Set();
+                allItems.forEach(item => {
+                  totalFee += parseFloat(item.data?.tradeFee) || 0;
+                  if (item.maskId) traders.add(item.maskId);
+                });
+
+                console.log("[Coinstep] All pages done: " + allItems.length + "/" + totalExpected + " items, fee=" + totalFee.toFixed(6));
+                resolve({
+                  data: {
+                    totalCustomerTradeFees: totalFee.toString(),
+                    totalCustomerTraders: traders.size,
+                    recordCount: allItems.length,
+                    totalRecords: totalExpected,
+                  },
+                  items: allItems,
+                });
+              }
+            };
+            window.addEventListener("message", handler);
+
+            // 30초 타임아웃 (여러 페이지 fetch 시간 확보)
+            const timeout = setTimeout(() => {
+              window.removeEventListener("message", handler);
+              if (allItems.length > 0) {
+                // 부분 데이터라도 반환
+                let totalFee = 0;
+                const traders = new Set();
+                allItems.forEach(item => {
+                  totalFee += parseFloat(item.data?.tradeFee) || 0;
+                  if (item.maskId) traders.add(item.maskId);
+                });
+                console.log("[Coinstep] Timeout with partial data: " + allItems.length + " items");
+                resolve({
+                  data: {
+                    totalCustomerTradeFees: totalFee.toString(),
+                    totalCustomerTraders: traders.size,
+                    recordCount: allItems.length,
+                    totalRecords: totalExpected,
+                    partial: true,
+                  },
+                  items: allItems,
+                });
+              } else {
+                resolve({ error: "TIMEOUT: 30초 내 응답 없음" });
+              }
+            }, 30000);
+
+            // 1페이지: filtersChange dispatch
+            console.log("[Coinstep] Dispatching filtersChange:", st, "~", et);
+            window.g_app._store.dispatch({
+              type: "lists/filtersChange",
+              payload: {
+                id: "historyOrders",
+                filters: {
+                  contractType: "USDT_MARGIN_CONTRACT",
+                  startTime: String(st),
+                  endTime: String(et),
+                }
+              }
+            });
+          });
+        },
+        args: [startTime, endTime],
+      }).then((results) => {
+        isFeeQuerying = false;
+        const result = results?.[0]?.result;
+        console.log("[BG] Fee query result:", JSON.stringify(result).substring(0, 300));
+        if (result?.error) {
+          sendResponse({ error: result.error });
+        } else {
+          sendResponse(result);
+        }
+      }).catch((e) => {
+        isFeeQuerying = false;
+        console.error("[BG] executeScript error:", e.message);
+        sendResponse({ error: "EXEC_ERROR: " + e.message });
+      });
+    });
+    return true; // 비동기 응답
   }
 
   if (msg.type === "TAB_LOADED") {
@@ -118,8 +308,10 @@ async function startSync() {
     // 기존 탭이 있으면 재사용, 없으면 새로 열기
     const posTid = await ensureTab(positionsTabId, "https://agent.tapbit.com/contract/positions/perpetual");
     const accTid = await ensureTab(accountsTabId, "https://agent.tapbit.com/contract/profits");
+    const hisTid = await ensureTab(historiesTabId, "https://agent.tapbit.com/contract/historyOrders/perpetual");
     positionsTabId = posTid;
     accountsTabId = accTid;
+    historiesTabId = hisTid;
 
     state = "WAITING_DATA";
     broadcastState();
@@ -223,6 +415,7 @@ async function doRefresh() {
   try {
     if (positionsTabId) await chrome.tabs.get(positionsTabId);
     if (accountsTabId) await chrome.tabs.get(accountsTabId);
+    if (historiesTabId) await chrome.tabs.get(historiesTabId);
   } catch (e) {
     console.log("[BG] Tab closed — stopping auto-refresh");
     stopAll();
@@ -243,6 +436,9 @@ async function doRefresh() {
   }
   if (accountsTabId) {
     chrome.tabs.sendMessage(accountsTabId, { type: "CLICK_REFRESH" }).catch(() => {});
+  }
+  if (historiesTabId) {
+    chrome.tabs.sendMessage(historiesTabId, { type: "CLICK_REFRESH" }).catch(() => {});
   }
 }
 
@@ -266,8 +462,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     accountsTabId = null;
     console.log("[BG] Accounts tab closed");
   }
-  // 둘 다 닫히면 중지
-  if (!positionsTabId && !accountsTabId && state !== "IDLE") {
+  if (tabId === historiesTabId) {
+    historiesTabId = null;
+    console.log("[BG] Histories tab closed");
+  }
+  // 모두 닫히면 중지
+  if (!positionsTabId && !accountsTabId && !historiesTabId && state !== "IDLE") {
     stopAll();
   }
 });

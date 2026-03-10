@@ -1,7 +1,7 @@
 /**
  * inject-tapbit.js — Tapbit 페이지 컨텍스트에서 실행
- * 
- * 역할: fetch 응답을 가로채서 positions/accounts/profile 데이터 캡처
+ *
+ * 역할: fetch 응답을 가로채서 positions/accounts/profile/histories 데이터 캡처
  */
 
 (function() {
@@ -68,6 +68,36 @@
             }, "*");
           }
         } catch (e) { /* 파싱 에러 무시 */ }
+      }
+
+      // summary 응답 캡처 (수수료 요약)
+      if (url.includes("/agent/contract/order/history/summary")) {
+        try {
+          const cloned = result.clone();
+          const json = await cloned.json();
+          console.log("[Coinstep] Summary API intercepted: code=" + json?.code);
+          if (json?.code === 200 && json?.data) {
+            window.postMessage({
+              type: "__TAPBIT_SUMMARY__",
+              data: json.data,
+            }, "*");
+          }
+        } catch (e) { console.log("[Coinstep] Summary parse error:", e.message); }
+      }
+
+      // histories 응답 캡처 (거래내역)
+      if (url.includes("/agent/contract/order/histories")) {
+        try {
+          const cloned = result.clone();
+          const json = await cloned.json();
+          console.log("[Coinstep] Histories API intercepted:", json?.data?.list?.length, "items");
+          if (json?.data?.list) {
+            window.postMessage({
+              type: "__TAPBIT_HISTORIES__",
+              data: json.data,
+            }, "*");
+          }
+        } catch (e) { console.log("[Coinstep] Histories parse error:", e.message); }
       }
 
     } catch (e) { /* 감시 에러 무시 — 원본 fetch에 영향 없음 */ }
