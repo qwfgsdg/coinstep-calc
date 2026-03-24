@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Coinstep Tapbit 동기화",
+  "description": "Tapbit 관리자 포지션을 Coinstep 계산기로 자동 동기화",
+  "version": "1.1.0",
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://agent.tapbit.com/*",
+    "https://agent-api.tapbit.com/*",
+    "https://pro.coinstep.co.kr/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://agent.tapbit.com/*"],
+      "js": ["content-tapbit.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://pro.coinstep.co.kr/*"],
+      "js": ["content-calc.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [{
+    "resources": ["inject-tapbit.js"],
+    "matches": ["https://agent.tapbit.com/*"]
+  }],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  }
+}
