@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>COINSTEP PRO — UI 개선 미리보기</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #050508; color: #cbd5e1;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .toggle-bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: #0a0a14; border-bottom: 1px solid #1e1e2e;
+    display: flex; justify-content: center; gap: 8px; padding: 12px;
+  }
+  .toggle-btn {
+    padding: 10px 28px; font-size: 14px; font-weight: 700; border-radius: 10px;
+    border: 1px solid #1e1e2e; background: transparent; color: #4b5563;
+    cursor: pointer; font-family: 'DM Sans'; transition: all 0.2s;
+  }
+  .toggle-btn.active {
+    background: #0ea5e910; border-color: #0ea5e944; color: #0ea5e9;
+  }
+  .container { max-width: 760px; margin: 70px auto 40px; padding: 0 12px; }
+
+  /* View switching */
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* Shared styles */
+  .section-label {
+    font-size: 11px; font-weight: 700; letter-spacing: 2.5px; text-transform: uppercase;
+    color: #0ea5e9; font-family: 'DM Sans'; margin: 24px 0 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section-label .dot { width: 3px; height: 14px; background: #0ea5e9; border-radius: 2px; }
+  .section-label.green { color: #10b981; }
+  .section-label.green .dot { background: #10b981; }
+  .section-label.amber { color: #f59e0b; }
+  .section-label.amber .dot { background: #f59e0b; }
+  .section-label.red { color: #f87171; }
+  .section-label.red .dot { background: #f87171; }
+
+  .card {
+    padding: 16px; border-radius: 12px; border: 1px solid #1e1e2e;
+    background: #08080f; margin-bottom: 10px;
+  }
+  .card-selected { border-color: #0ea5e9; background: #060a14; }
+
+  .mini-btn {
+    padding: 4px 10px; font-size: 11px; font-weight: 500;
+    border: 1px solid #1e1e2e; border-radius: 6px; background: transparent;
+    cursor: pointer; font-family: 'DM Sans'; color: #6b7280;
+  }
+
+  .badge {
+    font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px;
+  }
+  .badge-long { color: #34d399; background: #34d39912; border: 1px solid #34d39933; }
+  .badge-short { color: #f87171; background: #f8717112; border: 1px solid #f8717133; }
+
+  .sum-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .sum-card {
+    padding: 12px; border-radius: 10px; background: #08080f; border: 1px solid #1e1e2e;
+  }
+  .sum-label { font-size: 9px; color: #4b5563; font-family: 'DM Sans'; margin-bottom: 4px; }
+  .sum-value { font-size: 16px; font-weight: 700; font-family: 'DM Sans'; }
+
+  .inp {
+    width: 100%; padding: 10px 12px; background: #0a0a12; border: 1px solid #1e1e2e;
+    border-radius: 8px; color: #e2e8f0; font-size: 14px; font-family: 'IBM Plex Mono';
+    outline: none;
+  }
+  .inp:focus { border-color: #0ea5e9; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'IBM Plex Mono'; }
+  th {
+    padding: 10px; text-align: left; color: #4b5563; font-weight: 500; font-size: 10px;
+    letter-spacing: 0.5px; border-bottom: 1px solid #1e1e2e; background: #08080f;
+    white-space: nowrap; font-family: 'DM Sans';
+  }
+  td { padding: 10px; border-bottom: 1px solid #111118; white-space: nowrap; }
+
+  .tag-new {
+    display: inline-block; font-size: 9px; font-weight: 700; padding: 2px 6px;
+    border-radius: 4px; background: #f59e0b15; color: #f59e0b;
+    border: 1px solid #f59e0b33; margin-left: 8px; letter-spacing: 1px;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .fade-section {
+    opacity: 0.35; pointer-events: none; position: relative;
+  }
+  .fade-section::after {
+    content: '기존과 동일'; position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 13px; color: #4b5563; font-family: 'DM Sans'; font-weight: 600;
+    background: #050508cc; padding: 8px 20px; border-radius: 8px;
+    border: 1px dashed #1e1e2e;
+  }
+
+  .highlight-box {
+    border: 2px solid #f59e0b44 !important; position: relative;
+  }
+  .highlight-box::before {
+    content: 'NEW'; position: absolute; top: -10px; right: 12px;
+    font-size: 9px; font-weight: 800; padding: 2px 8px; border-radius: 4px;
+    background: #f59e0b; color: #050508; font-family: 'DM Sans'; letter-spacing: 1.5px;
+    z-index: 1;
+  }
+
+  /* Reduce section specific */
+  .reduce-row {
+    display: grid; grid-template-columns: 100px 80px 1fr 100px 100px;
+    gap: 8px; align-items: center; padding: 10px 12px;
+    border-radius: 8px; background: #0a0a14; margin-bottom: 6px;
+    border: 1px solid #1e1e2e; font-size: 12px;
+  }
+  .reduce-slider {
+    -webkit-appearance: none; width: 100%; height: 4px;
+    background: #1e1e2e; border-radius: 2px; outline: none;
+  }
+  .reduce-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px;
+    background: #f87171; border-radius: 50%; cursor: pointer;
+  }
+  .ratio-btns { display: flex; gap: 3px; }
+  .ratio-btn {
+    padding: 3px 0; font-size: 9px; font-weight: 600; border-radius: 4px;
+    cursor: pointer; font-family: 'DM Sans'; border: 1px solid #1e1e2e;
+    background: transparent; color: #4b5563; flex: 1; text-align: center;
+  }
+  .ratio-btn.active { border-color: #f8717166; background: #f8717115; color: #f87171; }
+
+  /* Liq dashboard */
+  .liq-dashboard {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+    margin-top: 8px;
+  }
+  .liq-coin {
+    padding: 10px; border-radius: 8px; background: #0a0a14;
+    border: 1px solid #1e1e2e; text-align: center;
+  }
+  .liq-coin-name { font-size: 10px; color: #6b7280; font-family: 'DM Sans'; font-weight: 600; }
+  .liq-coin-price { font-size: 15px; font-weight: 700; color: #f87171; font-family: 'DM Sans'; margin: 4px 0 2px; }
+  .liq-coin-dist { font-size: 10px; color: #34d399; }
+
+  .liq-change {
+    display: flex; align-items: center; gap: 4px; justify-content: center;
+    margin-top: 4px; font-size: 10px;
+  }
+  .arrow-improve { color: #34d399; }
+  .arrow-worse { color: #f87171; }
+
+  /* Before/After multi-coin table */
+  .ba-table { margin-top: 10px; border-radius: 10px; border: 1px solid #1e1e2e; overflow: hidden; }
+  .ba-table th { font-size: 9px; padding: 8px; }
+  .ba-table td { font-size: 11px; padding: 8px; }
+
+  .divider {
+    height: 1px; margin: 28px 0;
+    background: linear-gradient(90deg, transparent, #0ea5e922, transparent);
+  }
+
+  /* Description callout */
+  .desc-callout {
+    padding: 12px 16px; border-radius: 8px; margin-bottom: 16px;
+    background: #0ea5e908; border: 1px solid #0ea5e922;
+    font-size: 12px; color: #94a3b8; line-height: 1.7; font-family: 'DM Sans';
+  }
+  .desc-callout strong { color: #0ea5e9; }
+
+  /* Position quick-reduce inline */
+  .quick-reduce-panel {
+    margin-top: 10px; padding: 12px; border-radius: 8px;
+    background: #0c0c18; border: 1px solid #f8717133;
+  }
+  .qr-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .qr-result {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 8px;
+  }
+  .qr-item { text-align: center; }
+  .qr-label { font-size: 9px; color: #6b7280; font-family: 'DM Sans'; }
+  .qr-val { font-size: 13px; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<div class="toggle-bar">
+  <button class="toggle-btn active" onclick="showView('before')">BEFORE (현재)</button>
+  <button class="toggle-btn" onclick="showView('after')">AFTER (개선안)</button>
+</div>
+
+<!-- ═══════════════════════════════════ BEFORE ═══════════════════════════════════ -->
+<div class="view active" id="view-before">
+<div class="container">
+
+  <div style="margin-bottom: 20px; text-align: center;">
+    <div style="font-size: 24px; font-weight: 800; color: #f8fafc; font-family: 'DM Sans';">현재 레이아웃</div>
+    <div style="font-size: 12px; color: #4b5563; margin-top: 4px; font-family: 'DM Sans';">부분청산 접근: 물타기 버튼 → close 탭 전환 필요</div>
+  </div>
+
+  <!-- Positions -->
+  <div class="section-label"><div class="dot"></div>포지션</div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:14px; font-weight:800; color:#e2e8f0;">BTC</span>
+        <span class="badge badge-long">LONG</span>
+        <span style="font-size:11px; color:#6b7280;">x20</span>
+      </div>
+      <div style="display:flex; gap:4px;">
+        <button class="mini-btn">물타기</button>
+        <button class="mini-btn">🔥</button>
+        <button class="mini-btn">헷지</button>
+      </div>
+    </div>
+    <div style="display:flex; gap:16px; font-size:12px; color:#94a3b8;">
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">진입가</span><div style="font-weight:600">87,420.50</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">마진</span><div style="font-weight:600">500</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">포지션</span><div style="font-weight:600">10,000</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">PnL</span><div style="font-weight:600; color:#34d399">+245.30</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:14px; font-weight:800; color:#e2e8f0;">ETH</span>
+        <span class="badge badge-long">LONG</span>
+        <span style="font-size:11px; color:#6b7280;">x20</span>
+      </div>
+      <div style="display:flex; gap:4px;">
+        <button class="mini-btn">물타기</button>
+        <button class="mini-btn">🔥</button>
+        <button class="mini-btn">헷지</button>
+      </div>
+    </div>
+    <div style="display:flex; gap:16px; font-size:12px; color:#94a3b8;">
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">진입가</span><div style="font-weight:600">2,085.40</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">마진</span><div style="font-weight:600">300</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">포지션</span><div style="font-weight:600">6,000</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">PnL</span><div style="font-weight:600; color:#f87171">-120.50</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:14px; font-weight:800; color:#e2e8f0;">SOL</span>
+        <span class="badge badge-long">LONG</span>
+        <span style="font-size:11px; color:#6b7280;">x20</span>
+      </div>
+      <div style="display:flex; gap:4px;">
+        <button class="mini-btn" style="background:#0ea5e915; border-color:#0ea5e944; color:#0ea5e9;">✓ 선택됨</button>
+        <button class="mini-btn">🔥</button>
+        <button class="mini-btn">헷지</button>
+      </div>
+    </div>
+    <div style="display:flex; gap:16px; font-size:12px; color:#94a3b8;">
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">진입가</span><div style="font-weight:600">148.20</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">마진</span><div style="font-weight:600">200</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">포지션</span><div style="font-weight:600">4,000</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">PnL</span><div style="font-weight:600; color:#f87171">-85.20</div></div>
+    </div>
+  </div>
+
+  <!-- Account Summary -->
+  <div class="section-label"><div class="dot"></div>계좌 요약</div>
+  <div class="sum-grid">
+    <div class="sum-card"><div class="sum-label">총 미실현 PnL</div><div class="sum-value" style="color:#34d399">+39.60 USDT</div></div>
+    <div class="sum-card"><div class="sum-label">유효 잔고</div><div class="sum-value" style="color:#e2e8f0">2,039.60 USDT</div></div>
+    <div class="sum-card"><div class="sum-label">사용 마진</div><div class="sum-value" style="color:#94a3b8">1,000.00 USDT</div></div>
+    <div class="sum-card"><div class="sum-label">사용 가능</div><div class="sum-value" style="color:#34d399">834.30 USDT</div></div>
+  </div>
+
+  <!-- Liq bar (current: single coin only) -->
+  <div style="margin-top:10px; padding:16px; border-radius:10px; background:#08080f; border:1px solid #1e1e2e;">
+    <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+      <div>
+        <div style="font-size:9px; color:#4b5563; font-family:'DM Sans'">강제 청산가 <span style="color:#4b5563">(SOL)</span></div>
+        <div style="font-size:22px; font-weight:700; color:#f87171; font-family:'DM Sans'">$98.45</div>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:9px; color:#4b5563;">청산 여유</div>
+        <div style="font-size:16px; font-weight:700; color:#34d399;">33.6%</div>
+      </div>
+    </div>
+    <div style="margin-top:8px; font-size:10px; color:#4b5563; text-align:center; font-style:italic;">
+      ⚠ BTC, ETH 강청가는 별도 표시 없음 — 선택된 코인만 표시
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- DCA section (물타기 → close 탭) -->
+  <div class="section-label"><div class="dot"></div>물타기 — SOL 롱</div>
+
+  <div style="display:flex; gap:6px; margin-bottom:12px;">
+    <button style="flex:1; padding:10px 0; font-size:12px; font-weight:600; border-radius:8px; border:1px solid #1e1e2e; background:transparent; color:#4b5563; font-family:'DM Sans'; cursor:pointer;">추가 진입</button>
+    <button style="flex:1; padding:10px 0; font-size:12px; font-weight:600; border-radius:8px; border:1px solid #1e1e2e; background:transparent; color:#4b5563; font-family:'DM Sans'; cursor:pointer;">목표 평단</button>
+    <button style="flex:1; padding:10px 0; font-size:12px; font-weight:600; border-radius:8px; border:1px solid #f8717144; background:#f8717115; color:#f87171; font-family:'DM Sans'; cursor:pointer;">부분 청산</button>
+  </div>
+
+  <div style="font-size:11px; color:#6b7280; margin-bottom:12px;">지정 비율만큼 포지션을 줄였을 때의 손익과 잔여 포지션 확인</div>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px;">
+    <div>
+      <div style="font-size:10px; color:#6b7280; margin-bottom:4px;">손절 비율 (%)</div>
+      <input class="inp" value="50" style="font-size:13px; padding:8px 10px;">
+    </div>
+    <div>
+      <div style="font-size:10px; color:#6b7280; margin-bottom:4px;">손절 가격 ($)</div>
+      <input class="inp" value="" placeholder="현재가" style="font-size:13px; padding:8px 10px;">
+    </div>
+  </div>
+
+  <!-- Result -->
+  <div style="padding:20px; border-radius:12px; background:#0a0a14; border:1px solid #f8717144; margin-bottom:12px; text-align:center; font-family:'DM Sans';">
+    <div style="font-size:11px; color:#6b7280; margin-bottom:6px;">실현 손익</div>
+    <div style="font-size:28px; font-weight:700; color:#f87171;">-42.60 USDT</div>
+    <div style="font-size:12px; color:#6b7280; margin-top:4px;">마진 100 해제 · 수수료 2.38 USDT</div>
+  </div>
+
+  <!-- Before/After table (current: single liq only) -->
+  <div style="overflow-x:auto; border-radius:10px; border:1px solid #1e1e2e; margin-bottom:12px;">
+    <table>
+      <thead><tr>
+        <th></th><th>지갑 잔고</th><th>마진</th><th>사용 가능</th><th>청산가</th><th>청산여유</th><th>미실현 PnL</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td style="color:#6b7280">Before</td>
+          <td>2,000.00</td><td>200.00</td><td>834.30</td>
+          <td>$98.45</td><td>33.6%</td>
+          <td style="color:#f87171">-85.20 (-42.6%)</td>
+        </tr>
+        <tr style="background:#0c0c18">
+          <td style="color:#e2e8f0; font-weight:600">After</td>
+          <td style="color:#e2e8f0">1,955.02</td><td style="color:#e2e8f0">100.00</td>
+          <td style="color:#34d399; font-weight:600">889.72</td>
+          <td style="color:#34d399">$92.18</td><td style="color:#34d399">37.8%</td>
+          <td style="color:#f87171; font-weight:600">-42.60 (-42.6%)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="padding:12px 16px; border-radius:8px; background:#f8717108; border:1px solid #f8717122; font-size:12px; color:#f87171; margin-bottom:12px;">
+    ⚠ SOL 강청가만 표시됨 — BTC, ETH 강청가가 어떻게 변했는지는 알 수 없음
+  </div>
+
+  <div style="text-align:center; padding:30px; color:#333; font-size:11px; font-family:'DM Sans';">
+    — 현재 레이아웃 끝 —
+  </div>
+
+</div>
+</div>
+
+<!-- ═══════════════════════════════════ AFTER ═══════════════════════════════════ -->
+<div class="view" id="view-after">
+<div class="container">
+
+  <div style="margin-bottom: 20px; text-align: center;">
+    <div style="font-size: 24px; font-weight: 800; color: #f8fafc; font-family: 'DM Sans';">개선안 레이아웃</div>
+    <div style="font-size: 12px; color: #f59e0b; margin-top: 4px; font-family: 'DM Sans';">NEW 표시된 영역이 변경/추가된 부분</div>
+  </div>
+
+  <!-- Positions (with new ✂️ button) -->
+  <div class="section-label"><div class="dot"></div>포지션</div>
+
+  <!-- BTC Card -->
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:14px; font-weight:800; color:#e2e8f0;">BTC</span>
+        <span class="badge badge-long">LONG</span>
+        <span style="font-size:11px; color:#6b7280;">x20</span>
+      </div>
+      <div style="display:flex; gap:4px;">
+        <button class="mini-btn">물타기</button>
+        <button class="mini-btn">🔥</button>
+        <button class="mini-btn">헷지</button>
+        <button class="mini-btn" style="border-color:#f8717144; color:#f87171;">✂️</button>
+      </div>
+    </div>
+    <div style="display:flex; gap:16px; font-size:12px; color:#94a3b8;">
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">진입가</span><div style="font-weight:600">87,420.50</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">마진</span><div style="font-weight:600">500</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">포지션</span><div style="font-weight:600">10,000</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">PnL</span><div style="font-weight:600; color:#34d399">+245.30</div></div>
+    </div>
+    <span class="tag-new">3-B</span>
+  </div>
+
+  <!-- ETH Card -->
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:14px; font-weight:800; color:#e2e8f0;">ETH</span>
+        <span class="badge badge-long">LONG</span>
+        <span style="font-size:11px; color:#6b7280;">x20</span>
+      </div>
+      <div style="display:flex; gap:4px;">
+        <button class="mini-btn">물타기</button>
+        <button class="mini-btn">🔥</button>
+        <button class="mini-btn">헷지</button>
+        <button class="mini-btn" style="border-color:#f8717144; color:#f87171;">✂️</button>
+      </div>
+    </div>
+    <div style="display:flex; gap:16px; font-size:12px; color:#94a3b8;">
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">진입가</span><div style="font-weight:600">2,085.40</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">마진</span><div style="font-weight:600">300</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">포지션</span><div style="font-weight:600">6,000</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">PnL</span><div style="font-weight:600; color:#f87171">-120.50</div></div>
+    </div>
+  </div>
+
+  <!-- SOL Card with inline quick-reduce panel -->
+  <div class="card" style="border-color:#f87171;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:14px; font-weight:800; color:#e2e8f0;">SOL</span>
+        <span class="badge badge-long">LONG</span>
+        <span style="font-size:11px; color:#6b7280;">x20</span>
+      </div>
+      <div style="display:flex; gap:4px;">
+        <button class="mini-btn">물타기</button>
+        <button class="mini-btn">🔥</button>
+        <button class="mini-btn">헷지</button>
+        <button class="mini-btn" style="background:#f8717115; border-color:#f8717144; color:#f87171;">✂️ 축소중</button>
+      </div>
+    </div>
+    <div style="display:flex; gap:16px; font-size:12px; color:#94a3b8;">
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">진입가</span><div style="font-weight:600">148.20</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">마진</span><div style="font-weight:600">200</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">포지션</span><div style="font-weight:600">4,000</div></div>
+      <div><span style="font-size:9px; color:#4b5563; font-family:'DM Sans'">PnL</span><div style="font-weight:600; color:#f87171">-85.20</div></div>
+    </div>
+
+    <!-- Quick reduce panel (inline in card) -->
+    <div class="quick-reduce-panel">
+      <div style="font-size:10px; color:#f87171; font-weight:700; font-family:'DM Sans'; margin-bottom:8px;">
+        ✂️ 빠른 축소 <span class="tag-new">3-B</span>
+      </div>
+      <div class="qr-row">
+        <div style="flex:1">
+          <div style="font-size:9px; color:#6b7280; margin-bottom:3px;">비율</div>
+          <div class="ratio-btns">
+            <button class="ratio-btn">25%</button>
+            <button class="ratio-btn active">50%</button>
+            <button class="ratio-btn">75%</button>
+            <button class="ratio-btn">100%</button>
+          </div>
+        </div>
+        <div style="width:120px;">
+          <div style="font-size:9px; color:#6b7280; margin-bottom:3px;">가격</div>
+          <input class="inp" value="" placeholder="현재가" style="font-size:11px; padding:6px 8px;">
+        </div>
+      </div>
+      <div class="qr-result">
+        <div class="qr-item">
+          <div class="qr-label">실현 손익</div>
+          <div class="qr-val" style="color:#f87171;">-42.60</div>
+        </div>
+        <div class="qr-item">
+          <div class="qr-label">해제 마진</div>
+          <div class="qr-val" style="color:#34d399;">+100.00</div>
+        </div>
+        <div class="qr-item">
+          <div class="qr-label">잔여 수량</div>
+          <div class="qr-val" style="color:#e2e8f0;">13.5 SOL</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Account Summary + Liq Dashboard (3-A) ═══ -->
+  <div class="section-label"><div class="dot"></div>계좌 요약</div>
+  <div class="sum-grid">
+    <div class="sum-card"><div class="sum-label">총 미실현 PnL</div><div class="sum-value" style="color:#34d399">+39.60 USDT</div></div>
+    <div class="sum-card"><div class="sum-label">유효 잔고</div><div class="sum-value" style="color:#e2e8f0">2,039.60 USDT</div></div>
+    <div class="sum-card"><div class="sum-label">사용 마진</div><div class="sum-value" style="color:#94a3b8">1,000.00 USDT</div></div>
+    <div class="sum-card"><div class="sum-label">사용 가능</div><div class="sum-value" style="color:#34d399">834.30 USDT</div></div>
+  </div>
+
+  <!-- NEW: Liquidation Dashboard (3-A) -->
+  <div class="highlight-box" style="margin-top:10px; padding:16px; border-radius:10px; background:#08080f; border:1px solid #1e1e2e;">
+    <div style="font-size:10px; color:#f87171; font-weight:700; letter-spacing:1.5px; font-family:'DM Sans'; margin-bottom:8px;">
+      LIQUIDATION DASHBOARD <span class="tag-new">3-A</span>
+    </div>
+    <div class="liq-dashboard">
+      <div class="liq-coin">
+        <div class="liq-coin-name">BTC</div>
+        <div class="liq-coin-price">$72,150</div>
+        <div class="liq-coin-dist">여유 17.5%</div>
+      </div>
+      <div class="liq-coin">
+        <div class="liq-coin-name">ETH</div>
+        <div class="liq-coin-price">$1,620</div>
+        <div class="liq-coin-dist">여유 22.3%</div>
+      </div>
+      <div class="liq-coin">
+        <div class="liq-coin-name">SOL</div>
+        <div class="liq-coin-price">$98.45</div>
+        <div class="liq-coin-dist">여유 33.6%</div>
+      </div>
+    </div>
+    <div style="font-size:10px; color:#4b5563; text-align:center; margin-top:8px; font-family:'DM Sans';">
+      교차 마진 — 모든 코인이 공유 지갑에 연결됨 · 시뮬레이션 시 실시간 반영
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ═══ NEW: 포지션 축소 시뮬레이션 (2순위) ═══ -->
+  <div class="section-label red highlight-box" style="padding:12px 16px; border-radius:10px; background:transparent;">
+    <div class="dot" style="background:#f87171;"></div>
+    포지션 축소 시뮬레이션 <span class="tag-new">2순위</span>
+  </div>
+
+  <div class="desc-callout">
+    <strong>물타기 탭 없이도</strong> 각 포지션을 얼마나 줄일지 설정하면, <strong>모든 코인의 강청가 변화</strong>를 한 눈에 확인할 수 있습니다.
+  </div>
+
+  <!-- Compact reduce rows -->
+  <div class="reduce-row" style="opacity:0.5;">
+    <div style="display:flex; align-items:center; gap:6px;">
+      <span style="font-weight:700; color:#e2e8f0; font-size:12px;">BTC</span>
+      <span style="font-size:9px; color:#34d399;">롱</span>
+    </div>
+    <div style="text-align:center; color:#4b5563; font-size:11px;">0%</div>
+    <div><input type="range" class="reduce-slider" value="0" min="0" max="100"></div>
+    <div style="text-align:right; color:#4b5563; font-size:11px;">유지</div>
+    <div style="text-align:right; color:#4b5563; font-size:11px;">—</div>
+  </div>
+
+  <div class="reduce-row" style="opacity:0.5;">
+    <div style="display:flex; align-items:center; gap:6px;">
+      <span style="font-weight:700; color:#e2e8f0; font-size:12px;">ETH</span>
+      <span style="font-size:9px; color:#34d399;">롱</span>
+    </div>
+    <div style="text-align:center; color:#4b5563; font-size:11px;">0%</div>
+    <div><input type="range" class="reduce-slider" value="0" min="0" max="100"></div>
+    <div style="text-align:right; color:#4b5563; font-size:11px;">유지</div>
+    <div style="text-align:right; color:#4b5563; font-size:11px;">—</div>
+  </div>
+
+  <div class="reduce-row" style="border-color:#f8717144; background:#0e0810;">
+    <div style="display:flex; align-items:center; gap:6px;">
+      <span style="font-weight:700; color:#e2e8f0; font-size:12px;">SOL</span>
+      <span style="font-size:9px; color:#34d399;">롱</span>
+    </div>
+    <div style="text-align:center; color:#f87171; font-weight:700; font-size:13px;">50%</div>
+    <div>
+      <input type="range" class="reduce-slider" value="50" min="0" max="100">
+      <div class="ratio-btns" style="margin-top:4px;">
+        <button class="ratio-btn">25</button>
+        <button class="ratio-btn active">50</button>
+        <button class="ratio-btn">75</button>
+        <button class="ratio-btn">100</button>
+      </div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:10px; color:#f87171; font-weight:600;">-42.60</div>
+      <div style="font-size:9px; color:#6b7280;">실현</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:10px; color:#34d399; font-weight:600;">+100.00</div>
+      <div style="font-size:9px; color:#6b7280;">해제</div>
+    </div>
+  </div>
+
+  <!-- Multi-coin liq result (1순위 핵심!) -->
+  <div class="highlight-box" style="margin-top:12px; padding:16px; border-radius:10px; background:#08080f; border:1px solid #1e1e2e;">
+    <div style="font-size:10px; color:#f59e0b; font-weight:700; letter-spacing:1.5px; font-family:'DM Sans'; margin-bottom:10px;">
+      SOL 50% 축소 후 전체 강청가 변화 <span class="tag-new">1순위</span>
+    </div>
+
+    <div class="liq-dashboard">
+      <!-- BTC -->
+      <div class="liq-coin" style="border-color:#34d39933;">
+        <div class="liq-coin-name">BTC</div>
+        <div class="liq-coin-price" style="color:#34d399;">$70,880</div>
+        <div class="liq-change arrow-improve">
+          <span>$72,150</span>
+          <span>→</span>
+          <span style="font-weight:700;">$70,880</span>
+          <span style="font-size:9px; background:#34d39915; padding:1px 4px; border-radius:3px;">▼ 1.8%</span>
+        </div>
+        <div class="liq-coin-dist" style="margin-top:4px;">여유 17.5% → <strong>19.0%</strong></div>
+      </div>
+
+      <!-- ETH -->
+      <div class="liq-coin" style="border-color:#34d39933;">
+        <div class="liq-coin-name">ETH</div>
+        <div class="liq-coin-price" style="color:#34d399;">$1,582</div>
+        <div class="liq-change arrow-improve">
+          <span>$1,620</span>
+          <span>→</span>
+          <span style="font-weight:700;">$1,582</span>
+          <span style="font-size:9px; background:#34d39915; padding:1px 4px; border-radius:3px;">▼ 2.3%</span>
+        </div>
+        <div class="liq-coin-dist" style="margin-top:4px;">여유 22.3% → <strong>24.1%</strong></div>
+      </div>
+
+      <!-- SOL -->
+      <div class="liq-coin" style="border-color:#34d39933;">
+        <div class="liq-coin-name">SOL</div>
+        <div class="liq-coin-price" style="color:#34d399;">$92.18</div>
+        <div class="liq-change arrow-improve">
+          <span>$98.45</span>
+          <span>→</span>
+          <span style="font-weight:700;">$92.18</span>
+          <span style="font-size:9px; background:#34d39915; padding:1px 4px; border-radius:3px;">▼ 6.4%</span>
+        </div>
+        <div class="liq-coin-dist" style="margin-top:4px;">여유 33.6% → <strong>37.8%</strong></div>
+      </div>
+    </div>
+
+    <!-- Summary row -->
+    <div style="margin-top:12px; padding:10px 12px; border-radius:8px; background:#34d39908; border:1px solid #34d39922; display:flex; justify-content:space-between; font-size:11px;">
+      <div>
+        <span style="color:#6b7280;">새 지갑 잔고</span>
+        <span style="color:#e2e8f0; font-weight:600; margin-left:8px;">1,955.02 USDT</span>
+      </div>
+      <div>
+        <span style="color:#6b7280;">새 사용 가능</span>
+        <span style="color:#34d399; font-weight:600; margin-left:8px;">889.72 USDT</span>
+        <span style="color:#34d399; font-size:10px; margin-left:4px;">(+55.42)</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Before/After multi-coin table (3-C) -->
+  <div class="highlight-box ba-table" style="margin-top:10px;">
+    <div style="padding:10px 12px; font-size:10px; color:#f59e0b; font-weight:700; letter-spacing:1px; font-family:'DM Sans'; background:#08080f;">
+      BEFORE → AFTER 통합 비교 <span class="tag-new">3-C</span>
+    </div>
+    <table>
+      <thead><tr>
+        <th></th><th>지갑</th><th>마진</th><th>사용 가능</th>
+        <th>BTC 강청</th><th>ETH 강청</th><th>SOL 강청</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td style="color:#6b7280; font-family:'DM Sans'; font-size:10px; font-weight:600;">Before</td>
+          <td>2,000</td><td>1,000</td><td>834</td>
+          <td style="color:#f87171;">72,150</td>
+          <td style="color:#f87171;">1,620</td>
+          <td style="color:#f87171;">98.45</td>
+        </tr>
+        <tr style="background:#0c0c18;">
+          <td style="color:#f59e0b; font-family:'DM Sans'; font-size:10px; font-weight:700;">After</td>
+          <td style="color:#e2e8f0; font-weight:600;">1,955</td>
+          <td style="color:#e2e8f0; font-weight:600;">900</td>
+          <td style="color:#34d399; font-weight:600;">890</td>
+          <td style="color:#34d399; font-weight:600;">70,880 <span style="font-size:9px; color:#34d399;">▼</span></td>
+          <td style="color:#34d399; font-weight:600;">1,582 <span style="font-size:9px; color:#34d399;">▼</span></td>
+          <td style="color:#34d399; font-weight:600;">92.18 <span style="font-size:9px; color:#34d399;">▼</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Simultaneous Close (unchanged position, now below reduce section) -->
+  <div class="section-label green"><div class="dot"></div>동시청산 — SOL</div>
+  <div style="text-align:center; padding:20px; color:#4b5563; font-size:12px; font-family:'DM Sans'; background:#08080f; border-radius:10px; border:1px solid #1e1e2e;">
+    양방향(롱+숏) 보유 시 표시 · 기존과 동일
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- DCA section remains below -->
+  <div class="section-label"><div class="dot"></div>물타기 — SOL 롱</div>
+  <div style="text-align:center; padding:20px; color:#4b5563; font-size:12px; font-family:'DM Sans'; background:#08080f; border-radius:10px; border:1px solid #1e1e2e;">
+    추가 진입 · 목표 평단 · 부분 청산(상세) — 기존과 동일
+  </div>
+
+  <div style="height:40px;"></div>
+
+  <!-- Layout summary -->
+  <div style="padding:20px; border-radius:12px; background:#0a0a14; border:1px solid #f59e0b33;">
+    <div style="font-size:14px; font-weight:800; color:#f59e0b; font-family:'DM Sans'; margin-bottom:12px;">개선 요약</div>
+
+    <div style="font-size:12px; line-height:2; color:#94a3b8; font-family:'DM Sans';">
+      <div><span style="color:#f59e0b; font-weight:700;">1순위</span> <span style="color:#e2e8f0;">멀티코인 강청가 시뮬레이션</span> — 하나를 줄이면 나머지 코인 강청가 변화 즉시 표시</div>
+      <div><span style="color:#f59e0b; font-weight:700;">2순위</span> <span style="color:#e2e8f0;">포지션 축소 독립 섹션</span> — 물타기 탭 안 눌러도 슬라이더로 바로 시뮬</div>
+      <div><span style="color:#f59e0b; font-weight:700;">3-A</span> <span style="color:#e2e8f0;">강청가 대시보드</span> — 계좌 요약에 코인별 강청가 상시 표시</div>
+      <div><span style="color:#f59e0b; font-weight:700;">3-B</span> <span style="color:#e2e8f0;">카드 내 ✂️ 빠른 축소</span> — 포지션 카드 안에서 인라인 축소 가능</div>
+      <div><span style="color:#f59e0b; font-weight:700;">3-C</span> <span style="color:#e2e8f0;">Before→After 통합 테이블</span> — 모든 코인 강청가 한 테이블에 비교</div>
+    </div>
+
+    <div style="margin-top:14px; font-size:11px; color:#6b7280; font-family:'DM Sans';">
+      레이아웃 순서: 포지션 카드(✂️ 추가) → 계좌 요약 + 강청가 대시보드 → <strong style="color:#f59e0b;">포지션 축소</strong> → 동시청산 → 물타기/불타기
+    </div>
+  </div>
+
+  <div style="text-align:center; padding:30px; color:#333; font-size:11px; font-family:'DM Sans';">
+    — 개선안 레이아웃 끝 —
+  </div>
+
+</div>
+</div>
+
+<script>
+function showView(id) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('view-' + id).classList.add('active');
+  event.target.classList.add('active');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+</script>
+
+</body>
+</html>
