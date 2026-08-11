@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo, useEffect, useRef, Fragment } from "react";
+import PositionChart from "./PositionChart";
 
 /* ═══════════════════════════════════════════
    CONSTANTS & UTILITIES
@@ -154,6 +155,10 @@ export default function SimV4() {
   const [flowTargetDist, setFlowTargetDist] = useState("");
   const [flowRefCoin, setFlowRefCoin] = useState("");    // "" = 자동(가장 위험한 코인)
 
+  // 차트에 겹쳐 그릴 시뮬 — 마지막으로 만진 것 하나만
+  const [lastSim, setLastSim] = useState(null);
+  const simMountedRef = useRef(false);
+
   const [appTab, setAppTab] = useState("sim");
   const [hcMargin, setHcMargin] = useState("1000");
   const [hcLeverage, setHcLeverage] = useState("100");
@@ -178,6 +183,7 @@ export default function SimV4() {
   const parsedUsers = useMemo(() => {
     if (!tapbitData?.positions?.length) return [];
     const userMap = {};
+    const seenPos = new Set();   // 같은 계약·방향이 두 행으로 오면 id 가 충돌한다
     tapbitData.positions.forEach(item => {
       const id = item.maskId;
       if (!userMap[id]) {
@@ -185,8 +191,11 @@ export default function SimV4() {
       }
       if (item.data) {
         const d = item.data;
+        const posId = `${id}-${d.contractName}-${d.direction}`;
+        if (seenPos.has(posId)) return;
+        seenPos.add(posId);
         userMap[id].positions.push({
-          id: `${id}-${d.contractName}-${d.direction}`,
+          id: posId,
           coin: (d.contractName || "").replace("USDT", ""),
           dir: d.direction === 1 ? "long" : "short",
           entryPrice: String(d.averagePrice),
@@ -2158,6 +2167,41 @@ export default function SimV4() {
   }, [wallet, coinPrices, feeRate, coinLiqPrices, positions, selId, dcaMode, dcaEntries, revPrice, revTarget, targetAvail, closeRatio, closePrice, splitMode, splitTotal, splitPrices, pyraMode, pyraLockedId, pyraCounterId, pyraSubMode, pyraEntries, pyraRevPrice, pyraRevTarget, pyraSplitMode, pyraSplitTotal, pyraSplitPrices, scCloseRatios, scTargets, hedgeId, hedgeEntry, hedgeMargin, hedgeLev, reduceRatios, reducePrices, addMargins, addPrices,
       flowMode, flowSrc, flowAmount, flowTargetLiq, flowTargetDist, flowRefCoin]);
 
+  /* ── 마지막으로 만진 시뮬 추적 ──────────────────────
+     기존 입력 핸들러를 건드리지 않으려고 상태를 감시만 한다.
+     마운트 때 감시 effect 가 전부 한 번씩 발화하므로, 플래그를 켜는 effect 를
+     맨 마지막에 선언해서 초기 발화는 무시되게 한다. */
+  const markSim = (name) => { if (simMountedRef.current) setLastSim(name); };
+  useEffect(() => { markSim("dca"); }, [dcaEntries, revPrice, revTarget, splitTotal, splitPrices]);
+  useEffect(() => { markSim("add"); }, [addMargins, addPrices]);
+  useEffect(() => { markSim("reduce"); }, [reduceRatios, reducePrices]);
+  useEffect(() => { markSim("flow"); }, [flowAmount, flowTargetLiq, flowTargetDist, flowMode]);
+  useEffect(() => { simMountedRef.current = true; }, []);
+
+  // 시뮬 결과 → 차트 오버레이. 결과가 없으면 null 이라 회원 전환 직후엔 자동으로 사라진다.
+  const chartSim = useMemo(() => {
+    if (!calc || !lastSim) return null;
+    if (lastSim === "dca" && calc.dcaResult) {
+      const c = calc.sel?.coin;
+      return { label: "물타기 후", avgByCoin: c ? { [c]: calc.dcaResult.after.avg } : {}, liqMap: calc.dcaResult.afterLiqPerCoin };
+    }
+    if (lastSim === "add" && calc.addResult) {
+      const m = {};
+      calc.addResult.details.forEach(d => { m[d.coin] = d.newAvg; });
+      return { label: "마진추가 후", avgByCoin: m, liqMap: calc.addResult.afterLiqPerCoin };
+    }
+    if (lastSim === "reduce" && calc.reduceResult) {
+      return { label: "축소 후", avgByCoin: {}, liqMap: calc.reduceResult.afterLiqPerCoin };
+    }
+    if (lastSim === "flow" && calc.flowResult?.active) {
+      return {
+        label: calc.flowResult.mode === "withdraw" ? "출금 후" : "입금 후",
+        avgByCoin: {}, liqMap: calc.flowResult.afterLiqPerCoin,
+      };
+    }
+    return null;
+  }, [calc, lastSim]);
+
   const selPos = positions.find((p) => p.id === selId);
 
   // ── 입출금 시뮬 렌더 헬퍼 ──
@@ -2646,6 +2690,19 @@ export default function SimV4() {
             {/* ══════ SIMULATOR TAB ══════ */}
             {appTab === "sim" && (<>
 
+            {/* ① CHART */}
+            {usedCoins.length > 0 && (
+              <PositionChart
+                coins={usedCoins}
+                positions={calc?.parsed || []}
+                liqPerCoin={calc?.baseLiqPerCoin || null}
+                fee={n(feeRate) / 100}
+                theme={theme}
+                livePrices={coinPrices}
+                simOverlay={chartSim}
+              />
+            )}
+
             {/* ② POSITIONS (읽기 전용) */}
             <Sec label="포지션" />
             {positions.map((pos, idx) => (
@@ -2768,11 +2825,16 @@ export default function SimV4() {
                 <div style={{ display: "flex", gap: 4, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
                   {[500, 1000, 5000].map(v => (
                     <button key={v} onClick={() => onFlowAmount(String(v))}
-                      style={{ ...S.miniBtn, fontSize: 10, padding: "4px 10px" }}>
+                      style={{
+                        ...S.miniBtn, fontSize: 10, padding: "4px 10px",
+                        color: fr.mode === "withdraw" ? "#f87171" : "#34d399",
+                        borderColor: fr.mode === "withdraw" ? "#f8717133" : "#34d39933",
+                      }}>
                       {fr.mode === "withdraw" ? "−" : "+"}{fmt(v, 0)}
                     </button>
                   ))}
-                  <button onClick={() => onFlowAmount("")} style={{ ...S.miniBtn, fontSize: 10, padding: "4px 10px" }}>초기화</button>
+                  <button onClick={() => onFlowAmount("")}
+                    style={{ ...S.miniBtn, fontSize: 10, padding: "4px 10px", color: "var(--text-muted)" }}>초기화</button>
                   <div style={{ flex: 1 }} />
                   {fr.sensitivity != null && fr.refCoin && (
                     <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "'DM Sans'" }}>
