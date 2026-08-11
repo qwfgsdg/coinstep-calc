@@ -34,6 +34,16 @@
       console.log("[Coinstep] Sync data updated — v" + newData.version);
     }
 
+    // 동기화 실패 → 계산기 화면에 경고 (옛 데이터를 말없이 보여주지 않는다)
+    if (area === "local" && changes.tapbitSyncStatus) {
+      const s = changes.tapbitSyncStatus.newValue;
+      if (s && s.ok === false && s.message) {
+        window.dispatchEvent(new CustomEvent("tapbit-sync-response", {
+          detail: { error: true, message: s.message },
+        }));
+      }
+    }
+
     // histories 변경 시 PnL 패널 업데이트 (fee query 중에는 무시)
     if (area === "local" && changes.tapbitHistories) {
       if (isFeeQuerying) {
@@ -46,6 +56,32 @@
       }
     }
   });
+
+  // ── 자동 동기화 ──
+  // 이 페이지가 열려 있는 동안만 15초마다 백그라운드를 깨워 동기화시킨다.
+  // 워커의 setInterval 은 30초 유휴 종료 때문에 못 믿는다. 트리거를 페이지가 쥔다.
+  // (탭이 뒤로 가려지면 크롬이 타이머를 1분으로 늦춘다 — 보고 있을 때만 빠르면 된다.)
+  const AUTO_SYNC_MS = 15000;
+  let autoSyncTimer = null;
+  const stopAutoSync = (why) => {
+    if (autoSyncTimer) { clearInterval(autoSyncTimer); autoSyncTimer = null; }
+    window.dispatchEvent(new CustomEvent("tapbit-sync-response", { detail: { error: true, message: why } }));
+  };
+  const autoSync = () => {
+    // 확장이 업데이트/재시작되면 이 페이지에 남은 스크립트는 연결이 끊긴다.
+    // 그대로 두면 아무 안내 없이 자동 갱신만 조용히 멈춘다.
+    if (!chrome.runtime || !chrome.runtime.id) {
+      stopAutoSync("확장이 업데이트되었습니다 — 페이지를 새로고침하세요");
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage({ type: "AUTO_SYNC" }, () => void chrome.runtime.lastError);
+    } catch (e) {
+      stopAutoSync("확장 연결이 끊겼습니다 — 페이지를 새로고침하세요");
+    }
+  };
+  autoSyncTimer = setInterval(autoSync, AUTO_SYNC_MS);
+  setTimeout(autoSync, 2000);
 
   // ── 초기 로드 시 기존 데이터 전달 ──
   chrome.storage.local.get("tapbitData", (result) => {
@@ -613,9 +649,18 @@
     savedEndDate = endInput.value;
     isFeeQuerying = true;
 
-    // UTC 기준 타임스탬프 (Tapbit API 형식과 일치)
+    // UTC 자정 기준. Tapbit 자체 화면과 완전히 같은 경계라 값이 어긋나지 않는다
+    // (한국시간으로는 당일 09:00 ~ 다음날 08:59 구간).
     const startTime = new Date(startInput.value + "T00:00:00.000Z").getTime();
     const endTime = new Date(endInput.value + "T23:59:59.999Z").getTime();
+
+    // 거꾸로 넣으면 서버가 응답을 아예 안 준다. 30초 멈췄다 실패하지 말고 여기서 막는다.
+    if (!(startTime < endTime)) {
+      feeEl.textContent = "시작일이 종료일보다 늦습니다";
+      feeEl.style.color = "#f87171";
+      isFeeQuerying = false;
+      return;
+    }
     console.log("[Coinstep] Fee query:", startInput.value, "~", endInput.value, "startTime:", startTime, "endTime:", endTime, "member:", memberSelect.value);
 
     feeEl.textContent = "조회 중...";
@@ -635,14 +680,9 @@
       if (chrome.runtime.lastError || response?.error) {
         const rawErr = chrome.runtime.lastError?.message || response?.error || "UNKNOWN";
         console.error("[Coinstep] Summary error:", rawErr);
-        let errMsg;
-        if (response?.error === "AUTH_NOT_FOUND") {
-          errMsg = "인증 만료. Tapbit 새로고침 필요";
-        } else if (rawErr.includes("HTTP_")) {
-          errMsg = "API 오류";
-        } else {
-          errMsg = "조회 실패";
-        }
+        // 백그라운드가 원인을 문장으로 넘겨준다. 뭉뚱그린 "조회 실패" 대신 그대로 보여준다.
+        const errMsg = response?.message
+          || (chrome.runtime.lastError ? "확장 응답 없음 — 페이지를 새로고침하세요" : "조회 실패 (" + rawErr + ")");
         feeEl.innerHTML = esc(errMsg) + ' <button id="cs-p-retry" style="background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:3px;padding:1px 8px;font-size:10px;cursor:pointer;margin-left:6px;">재시도</button>';
         feeEl.style.color = "#f87171";
         document.getElementById("cs-p-retry")?.addEventListener("click", fetchFeeSummary);
