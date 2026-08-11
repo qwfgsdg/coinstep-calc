@@ -1,6 +1,6 @@
 /**
  * content-tapbit.js — agent.tapbit.com에 주입되는 content script
- * 
+ *
  * 역할:
  * 1. inject-tapbit.js를 페이지 컨텍스트에 삽입
  * 2. 캡처된 데이터를 background.js로 중계
@@ -10,43 +10,7 @@
 (function() {
   "use strict";
 
-  // ── fetch 래핑 코드를 인라인으로 즉시 삽입 (동기 실행, Tapbit JS보다 먼저) ──
-  const injectCode = `(function(){
-    const _origFetch = window.fetch;
-    window.fetch = async function(...args) {
-      const result = await _origFetch.apply(this, args);
-      try {
-        const url = typeof args[0]==="string" ? args[0] : (args[0]?.url||"");
-        if (!url.includes("agent-api.tapbit.com")) return result;
-        const am = url.match(/auth=([^&]+)/);
-        if (am) window.postMessage({type:"__TAPBIT_AUTH__",auth:am[1]},"*");
-        if (url.includes("/agent/contract/positions") && url.includes("contractType=")) {
-          try { const c=result.clone(); const d=await c.json();
-            console.log("[Coinstep] Positions intercepted, list:",d?.data?.list?.length);
-            if(d?.data?.list) window.postMessage({type:"__TAPBIT_POSITIONS__",data:d.data},"*");
-          } catch(e){ console.log("[Coinstep] Pos parse err:",e.message); }
-        }
-        if (url.includes("/agent/accounts") && url.includes("contractType=")) {
-          try { const c=result.clone(); const d=await c.json();
-            console.log("[Coinstep] Accounts intercepted, list:",d?.data?.list?.length);
-            if(d?.data?.list) window.postMessage({type:"__TAPBIT_ACCOUNTS__",data:d.data},"*");
-          } catch(e){ console.log("[Coinstep] Acc parse err:",e.message); }
-        }
-        if (url.includes("/agent/profile")) {
-          try { const c=result.clone(); const d=await c.json();
-            if(d?.data?.maskId) window.postMessage({type:"__TAPBIT_PROFILE__",profile:{maskId:d.data.maskId,remarkName:d.data.remarkName||""}},"*");
-          } catch(e){}
-        }
-      } catch(e){}
-      return result;
-    };
-    console.log("[Coinstep] Tapbit fetch monitor active (inline)");
-  })();`;
-
-  const script = document.createElement("script");
-  script.textContent = injectCode;
-  (document.head || document.documentElement).appendChild(script);
-  script.remove();
+  // inject-tapbit.js가 "world": "MAIN"으로 직접 실행됨 (manifest에서 설정)
 
   // ── inject에서 보내는 메시지를 background로 중계 ──
   window.addEventListener("message", (e) => {
@@ -80,6 +44,15 @@
         profile: e.data.profile,
       }).catch(() => {});
     }
+
+    // histories 데이터 중계
+    if (type === "__TAPBIT_HISTORIES__") {
+      chrome.runtime.sendMessage({
+        type: "DATA_HISTORIES",
+        data: e.data.data,
+      }).catch(() => {});
+    }
+
   });
 
   // ── background에서 보내는 명령 수신 ──
@@ -107,6 +80,9 @@
     if (msg.type === "CHECK_PAGE_READY") {
       sendResponse({ ready: true, url: window.location.href });
     }
+
+    // summary API는 이제 background.js에서 직접 fetch (host_permissions CORS 우회)
+
   });
 
   // ── 로드 완료 알림 (페이지 로드 후) ──
