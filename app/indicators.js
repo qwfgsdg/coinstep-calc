@@ -5,127 +5,34 @@
    목록 · 설정폼 · 차트 렌더가 전부 이 정의를 읽어서 자동으로 만들어지므로
    지표를 추가할 때 UI 코드는 건드리지 않는다.
 
-   compute(candles, params) -> { [outputKey]: [{ time, value, color? }] }
+   compute(candles, params) -> { [outputKey]: 출력 }
+
+   출력 종류 (outputs[].type)
+     line       [{ time, value, color? }]           color 는 봉마다 달라도 된다
+     histogram  [{ time, value, color? }]
+     markers    [{ time, position, shape, color, text?, size?, price? }]
+     barcolor   [{ time, color }]                   캔들 자체를 칠한다
+     dash       [{ label, value, color? }]          차트 위 상태 표 (마지막 봉 기준)
+
+   아래 넷은 캔버스에 직접 그린다 (./primitives). x 좌표는 시각이 아니라 봉 인덱스다.
+     band       [{ i, upper, lower, color }]        두 선 사이 채우기
+     boxes      [{ i1, i2, top, bottom, ... }]      사각형 · 수평선 · 라벨
+     profile    { i0, i1, rows, maxVol, poc, ... }  가로 히스토그램
+     shapes     [{ i, price, shape, color, ... }]   다이아 등 임의 도형
+
    워밍업 구간(값이 없는 앞부분)은 아예 빼고 반환한다.
+   수학 함수는 전부 ./ta 에 있다.
    ═══════════════════════════════════════════ */
 
-const pickSrc = (c, s) =>
-  s === "open" ? c.open :
-  s === "high" ? c.high :
-  s === "low" ? c.low :
-  s === "hl2" ? (c.high + c.low) / 2 :
-  s === "hlc3" ? (c.high + c.low + c.close) / 3 :
-  c.close;
+import {
+  sma, ema, stdev, wilder, emaSparse, trueRange, rsi,
+  pickSrc, SRC_OPTIONS, toPoints,
+} from "./ta";
+import { PINE_INDICATORS } from "./indicators-pine";
+import { PRIMITIVE_TYPES } from "./primitives";
 
-/* ── 계산 헬퍼 (입력과 같은 길이, 워밍업은 null) ── */
-
-export function sma(v, len) {
-  const out = new Array(v.length).fill(null);
-  if (len <= 0) return out;
-  let sum = 0;
-  for (let i = 0; i < v.length; i++) {
-    sum += v[i];
-    if (i >= len) sum -= v[i - len];
-    if (i >= len - 1) out[i] = sum / len;
-  }
-  return out;
-}
-
-export function ema(v, len) {
-  const out = new Array(v.length).fill(null);
-  if (len <= 0 || v.length < len) return out;
-  const k = 2 / (len + 1);
-  let prev = 0;
-  for (let j = 0; j < len; j++) prev += v[j];
-  prev /= len;
-  out[len - 1] = prev;
-  for (let i = len; i < v.length; i++) {
-    prev = v[i] * k + prev * (1 - k);
-    out[i] = prev;
-  }
-  return out;
-}
-
-export function rsi(closes, len) {
-  const out = new Array(closes.length).fill(null);
-  if (closes.length <= len || len <= 0) return out;
-  let gain = 0, loss = 0;
-  for (let i = 1; i <= len; i++) {
-    const d = closes[i] - closes[i - 1];
-    if (d >= 0) gain += d; else loss -= d;
-  }
-  gain /= len; loss /= len;
-  out[len] = loss === 0 ? 100 : 100 - 100 / (1 + gain / loss);
-  for (let i = len + 1; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1];
-    gain = (gain * (len - 1) + (d > 0 ? d : 0)) / len;
-    loss = (loss * (len - 1) + (d < 0 ? -d : 0)) / len;
-    out[i] = loss === 0 ? 100 : 100 - 100 / (1 + gain / loss);
-  }
-  return out;
-}
-
-// 롤링 표준편차 (평균은 sma 와 같은 창)
-export function stdev(v, len) {
-  const out = new Array(v.length).fill(null);
-  if (len <= 1) return out;
-  let s = 0, s2 = 0;
-  for (let i = 0; i < v.length; i++) {
-    s += v[i]; s2 += v[i] * v[i];
-    if (i >= len) { s -= v[i - len]; s2 -= v[i - len] * v[i - len]; }
-    if (i >= len - 1) {
-      const m = s / len;
-      out[i] = Math.sqrt(Math.max(0, s2 / len - m * m));
-    }
-  }
-  return out;
-}
-
-// Wilder 평활 (ATR 용)
-export function wilder(v, len, from) {
-  const out = new Array(v.length).fill(null);
-  if (v.length <= from + len - 1) return out;
-  let sum = 0;
-  for (let i = from; i < from + len; i++) sum += v[i];
-  let prev = sum / len;
-  out[from + len - 1] = prev;
-  for (let i = from + len; i < v.length; i++) {
-    prev = (prev * (len - 1) + v[i]) / len;
-    out[i] = prev;
-  }
-  return out;
-}
-
-// null 이 섞인 배열에 EMA 를 걸어 원래 위치로 되돌린다 (MACD 시그널용)
-export function emaSparse(arr, len) {
-  const out = new Array(arr.length).fill(null);
-  const idx = [], vals = [];
-  arr.forEach((v, i) => { if (v != null) { idx.push(i); vals.push(v); } });
-  const e = ema(vals, len);
-  e.forEach((v, i) => { if (v != null) out[idx[i]] = v; });
-  return out;
-}
-
-// 배열 -> lightweight-charts 포인트 (null 구간 제거)
-const toPoints = (candles, arr, colorFn) => {
-  const out = [];
-  for (let i = 0; i < arr.length; i++) {
-    if (arr[i] == null || !isFinite(arr[i])) continue;
-    const p = { time: candles[i].time, value: arr[i] };
-    if (colorFn) p.color = colorFn(candles[i], i);
-    out.push(p);
-  }
-  return out;
-};
-
-const SRC_OPTIONS = [
-  { value: "close", label: "종가" },
-  { value: "open", label: "시가" },
-  { value: "high", label: "고가" },
-  { value: "low", label: "저가" },
-  { value: "hl2", label: "고저 중간" },
-  { value: "hlc3", label: "대표가" },
-];
+// 예전 코드가 이 모듈에서 가져다 쓰던 것들 — 재수출로 호환 유지
+export { sma, ema, rsi, stdev, wilder, emaSparse } from "./ta";
 
 /* ── 레지스트리 ── */
 
@@ -162,11 +69,9 @@ export const REGISTRY = [
     outputs: [{ key: "vol", type: "histogram" }],
     label: () => "거래량",
     compute: (candles, p) => ({
-      vol: toPoints(
-        candles,
-        candles.map((c) => c.volume ?? 0),
-        (c) => (c.close >= c.open ? p.up : p.down)
-      ),
+      vol: toPoints(candles, candles.map((c) => c.volume ?? 0), {
+        colorFn: (c) => (c.close >= c.open ? p.up : p.down),
+      }),
     }),
   },
 
@@ -253,12 +158,7 @@ REGISTRY.push(
     ],
     outputs: [{ key: "atr", type: "line" }],
     label: (p) => `ATR ${p.len}`,
-    compute: (c, p) => {
-      const tr = c.map((x, i) => (i === 0 ? x.high - x.low : Math.max(
-        x.high - x.low, Math.abs(x.high - c[i - 1].close), Math.abs(x.low - c[i - 1].close)
-      )));
-      return { atr: toPoints(c, wilder(tr, p.len, 1)) };
-    },
+    compute: (c, p) => ({ atr: toPoints(c, wilder(trueRange(c), p.len, 1)) }),
   },
 
   {
@@ -290,7 +190,7 @@ REGISTRY.push(
       return {
         macd: toPoints(c, m),
         signal: toPoints(c, sig),
-        hist: toPoints(c, hist, (_, i) => (hist[i] >= 0 ? "#34d39966" : "#f8717166")),
+        hist: toPoints(c, hist, { colorFn: (_, i) => (hist[i] >= 0 ? "#34d39966" : "#f8717166") }),
       };
     },
   },
@@ -336,6 +236,9 @@ REGISTRY.push(
   }
 );
 
+/* ── TradingView 이식 지표 ── */
+REGISTRY.push(...PINE_INDICATORS);
+
 export const byId = (id) => REGISTRY.find((r) => r.id === id);
 
 export const defaults = (def) => {
@@ -345,3 +248,10 @@ export const defaults = (def) => {
 };
 
 export const CATEGORIES = ["추세", "변동성", "모멘텀", "거래량"];
+
+/* 출력 종류별 분류 — PositionChart 가 렌더 경로를 고를 때 쓴다 */
+export const SERIES_TYPES = new Set(["line", "histogram"]);
+export const seriesOutputs = (def) => (def.outputs || []).filter((o) => SERIES_TYPES.has(o.type));
+export const outputsOfType = (def, type) => (def.outputs || []).filter((o) => o.type === type);
+export const primitiveOutputs = (def) =>
+  (def.outputs || []).filter((o) => PRIMITIVE_TYPES[o.type] !== undefined);
