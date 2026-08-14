@@ -218,23 +218,40 @@ export default function SimV4() {
     return parsedUsers.find(u => u.maskId === selectedUserId) || null;
   }, [parsedUsers, selectedUserId]);
 
-  // ── selectedUser 변경 → 로컬 상태 동기화 ──
+  // ── 데이터 반영 (동기화될 때마다) ──
+  // 자동 동기화는 15초마다 같은 회원을 새 객체로 넘긴다. 여기서 입력까지 비우면
+  // 사용자가 타이핑하던 값이 계속 지워지므로, 이 effect 는 숫자만 갱신한다.
   useEffect(() => {
     if (!selectedUser) return;
     setWallet(selectedUser.wallet);
     setPositions(selectedUser.positions);
+    // 거래소 강청가. 문자열 "0" 은 참이라 그대로 쓰면 같은 코인의 유효한 값을 가로막는다.
+    // (헷지 회원은 한쪽 다리만 0 으로 오는 경우가 있다.) 숫자로 바꿔 판단한다.
     const liqMap = {};
     selectedUser.positions.forEach(p => {
-      if (p.liquidationPrice && !liqMap[p.coin]) liqMap[p.coin] = p.liquidationPrice;
+      const v = n(p.liquidationPrice);
+      if (v > 0 && !liqMap[p.coin]) liqMap[p.coin] = String(v);
     });
     setCoinLiqPrices(liqMap);
-    // 시뮬레이션 상태 초기화
+  }, [selectedUser]);
+
+  // ── 시뮬 입력 초기화 (회원이 바뀔 때만) ──
+  useEffect(() => {
     setSelId(null); setHedgeId(null);
     setPyraMode(false); setPyraLockedId(null); setPyraCounterId(null);
     setDcaEntries([mkDCA()]); setDcaMode("sim");
     setFlowMode("deposit"); setFlowSrc("amount");
     setFlowAmount(""); setFlowTargetLiq(""); setFlowTargetDist(""); setFlowRefCoin("");
-  }, [selectedUser]);
+  }, [selectedUserId]);
+
+  // 동기화 사이에 포지션이 청산되면 선택만 풀어준다 (결과가 빈 채로 남지 않게)
+  useEffect(() => {
+    if (selId && !positions.some(p => p.id === selId)) setSelId(null);
+    if (hedgeId && !positions.some(p => p.id === hedgeId)) setHedgeId(null);
+    if (pyraCounterId && !positions.some(p => p.id === pyraCounterId)) {
+      setPyraMode(false); setPyraLockedId(null); setPyraCounterId(null);
+    }
+  }, [positions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // selectedUser 사라짐 체크
   useEffect(() => {
@@ -1971,8 +1988,11 @@ export default function SimV4() {
 
     // ── 포지션 축소 시뮬레이션 ──
     let reduceResult = null;
-    const hasActiveReduce = Object.values(reduceRatios).some(v => n(v) > 0);
-    if (hasActiveReduce && mmRate && parsed.length > 0) {
+    // 활성 판정은 "현재 회원의 포지션"만 본다. 전체를 보면 다른 회원에 넣어둔
+    // 값 때문에 손대지도 않은 회원 화면에 빈 결과 블록이 뜬다.
+    const hasActiveReduce = parsed.some(p => n(reduceRatios[p.id] || 0) > 0);
+    // 강청가(→MMR)를 몰라도 실현손익·여유마진은 계산된다. 강청가 변화만 뺀다.
+    if (hasActiveReduce && parsed.length > 0) {
       let simWallet = wb;
       const reduceDetails = [];
       const simParsed = parsed.map(p => {
@@ -1997,7 +2017,7 @@ export default function SimV4() {
         };
       }).filter(p => p.qty > 0);
 
-      const afterLiqPerCoinReduce = calcLiqPerCoin(simParsed, mmRate, simWallet);
+      const afterLiqPerCoinReduce = mmRate ? calcLiqPerCoin(simParsed, mmRate, simWallet) : null;
       const simTotalMargin = simParsed.reduce((a, p) => a + p.mg, 0);
       const simLossPnL = simParsed.reduce((a, p) => {
         const pnl2 = p.pcp > 0 ? p.sign * (p.pcp - p.ep) * p.qty : 0;
@@ -2020,8 +2040,8 @@ export default function SimV4() {
 
     // ── 포지션 마진 추가 시뮬레이션 ──
     let addResult = null;
-    const hasActiveAdd = Object.values(addMargins).some(v => n(v) > 0);
-    if (hasActiveAdd && mmRate && parsed.length > 0) {
+    const hasActiveAdd = parsed.some(p => n(addMargins[p.id] || 0) > 0);
+    if (hasActiveAdd && parsed.length > 0) {
       let totalAddedMargin = 0;
       let totalAddFee = 0;
       const addDetails = [];
@@ -2051,7 +2071,7 @@ export default function SimV4() {
         return { ...p, ep: newAvg, mg: newMargin, notional: newNotional, qty: newQty };
       });
 
-      const afterLiqPerCoinAdd = calcLiqPerCoin(simParsedAdd, mmRate, wb);
+      const afterLiqPerCoinAdd = mmRate ? calcLiqPerCoin(simParsedAdd, mmRate, wb) : null;
       const addTotalMargin = simParsedAdd.reduce((a, p) => a + p.mg, 0);
       const addLossPnL = simParsedAdd.reduce((a, p) => {
         const pnl2 = p.pcp > 0 ? p.sign * (p.pcp - p.ep) * p.qty : 0;
@@ -2203,6 +2223,19 @@ export default function SimV4() {
   }, [calc, lastSim]);
 
   const selPos = positions.find((p) => p.id === selId);
+
+  // 거래소가 실제로 보낸 강청가 원본. 값이 없을 때 원인을 화면에서 바로 알 수 있게 표시한다
+  // (다른 사용자 브라우저의 콘솔은 볼 수 없으므로 로그로는 진단이 안 된다).
+  const liqRaw = useMemo(() => {
+    const m = {};
+    positions.forEach((p) => {
+      const raw = p.liquidationPrice;
+      const label = raw === "" || raw == null ? "(값 없음)" : String(raw);
+      if (!m[p.coin]) m[p.coin] = [];
+      if (!m[p.coin].includes(label)) m[p.coin].push(label);
+    });
+    return m;
+  }, [positions]);
 
   // ── 입출금 시뮬 렌더 헬퍼 ──
   const fr = calc?.flowResult || null;
@@ -3216,7 +3249,18 @@ export default function SimV4() {
               </div>
             ) : (
               <div style={S.liqEmpty}>
-                거래소 강제 청산가를 입력하면 청산가 분석이 표시됩니다
+                <div>거래소가 강제청산가를 주지 않아 청산가 분석을 할 수 없습니다</div>
+                {Object.keys(liqRaw).length > 0 && (
+                  <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 6, fontFamily: "'IBM Plex Mono'" }}>
+                    {Object.entries(liqRaw).map(([coin, vals]) => (
+                      <div key={coin}>{coin} 수신값: {vals.join(" / ")}</div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 6, fontFamily: "'DM Sans'" }}>
+                  헷지 상태이거나 잔고가 충분해 청산 위험이 없는 경우 거래소가 값을 주지 않습니다.
+                  마진 추가 · 포지션 축소의 평단 · 여유마진 계산은 그대로 사용할 수 있습니다.
+                </div>
               </div>
             )}
 
@@ -3316,9 +3360,14 @@ export default function SimV4() {
                         )}
                         {/* 코인별 강청가 변화 */}
                         <div style={{ fontSize: 9, color: "#f59e0b", fontWeight: 700, letterSpacing: 1, marginBottom: 6 }}>강청가 변화</div>
-                        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(Object.keys(calc.addResult.baseLiqPerCoin).length, 4)}, 1fr)`, gap: 6 }}>
+                        {!calc.addResult.afterLiqPerCoin && (
+                          <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "'DM Sans'", marginBottom: 6 }}>
+                            거래소 강청가가 없어 강청가 변화는 계산할 수 없습니다 (위 값들은 정상입니다)
+                          </div>
+                        )}
+                        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.max(Math.min(Object.keys(calc.addResult.baseLiqPerCoin).length, 4), 1)}, 1fr)`, gap: 6 }}>
                           {Object.entries(calc.addResult.baseLiqPerCoin).map(([coin, before]) => {
-                            const after = calc.addResult.afterLiqPerCoin[coin];
+                            const after = calc.addResult.afterLiqPerCoin?.[coin];
                             if (!before || !after) return null;
                             const improved = liqImproved(before, after);
                             return (
@@ -3414,9 +3463,14 @@ export default function SimV4() {
                         </div>
                         {/* 코인별 강청가 변화 */}
                         <div style={{ fontSize: 9, color: "#f59e0b", fontWeight: 700, letterSpacing: 1, marginBottom: 6 }}>강청가 변화</div>
-                        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(Object.keys(calc.reduceResult.baseLiqPerCoin).length, 4)}, 1fr)`, gap: 6 }}>
+                        {!calc.reduceResult.afterLiqPerCoin && (
+                          <div style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "'DM Sans'", marginBottom: 6 }}>
+                            거래소 강청가가 없어 강청가 변화는 계산할 수 없습니다 (위 값들은 정상입니다)
+                          </div>
+                        )}
+                        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.max(Math.min(Object.keys(calc.reduceResult.baseLiqPerCoin).length, 4), 1)}, 1fr)`, gap: 6 }}>
                           {Object.entries(calc.reduceResult.baseLiqPerCoin).map(([coin, before]) => {
-                            const after = calc.reduceResult.afterLiqPerCoin[coin];
+                            const after = calc.reduceResult.afterLiqPerCoin?.[coin];
                             if (!before) return null;
                             const improved = liqImproved(before, after);
                             return (
