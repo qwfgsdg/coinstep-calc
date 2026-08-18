@@ -2,6 +2,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { REGISTRY, CATEGORIES, byId, defaults, seriesOutputs, outputsOfType, primitiveOutputs } from "./indicators";
 import { PRIMITIVE_TYPES } from "./primitives";
+import { DrawingController } from "./drawing-layer";
+import { shortcutOf, byId as drawById } from "./drawings";
+import DrawToolbar, { TOOLBAR_W } from "./DrawToolbar";
 
 /* ═══════════════════════════════════════════
    POSITION CHART
@@ -38,6 +41,9 @@ const SUB_PANE_H = 90;         // 보조 창 하나당 높이 — 전체 차트�
 const MAX_SUB_PANES = 3;
 const STORE_KEY = "cs-chart-indicators";   // 보는 사람 취향이라 회원과 무관하게 전역 저장
 const DASH_KEY = "cs-chart-dash-open";
+// 그림은 지표와 달리 코인마다 다르다. { BTC: [...], ETH: [...] } 로 저장한다.
+const DRAW_KEY = "cs-chart-drawings";
+const NO_DRAWINGS = [];                    // 참조가 매번 바뀌면 동기화 effect 가 헛돈다
 
 let iidSeq = 0;
 const nextIid = () => `i${Date.now().toString(36)}${++iidSeq}`;
@@ -114,6 +120,18 @@ export default function PositionChart({ coins, positions, liqPerCoin, fee, theme
     return window.localStorage.getItem(DASH_KEY) !== "0";
   });
 
+  // ── 그리기 ──
+  // localStorage 를 useState 초기화에서 읽으면 서버 렌더(빈 값)와 어긋나 하이드레이션이
+  // 깨진다. 그림 개수가 버튼 유무를 바꾸기 때문에 실제로 터진다. 마운트 후에 읽는다.
+  const [drawAll, setDrawAll] = useState({});
+  const [hist, setHist] = useState({});           // 코인 -> 직전 목록들 (실행 취소)
+  const [tool, setTool] = useState(null);         // null = 커서
+  const [selectedDid, setSelectedDid] = useState(null);
+  const [magnet, setMagnet] = useState(false);
+  const [stayDraw, setStayDraw] = useState(false);
+  const [drawLocked, setDrawLocked] = useState(false);
+  const [drawHidden, setDrawHidden] = useState(false);
+
   const boxRef = useRef(null);            // 카드 전체 (전체화면 시 뷰포트를 덮는 요소)
   const areaRef = useRef(null);           // 차트가 차지할 영역
   const wrapRef = useRef(null);           // lightweight-charts 가 붙는 요소
@@ -135,6 +153,11 @@ export default function PositionChart({ coins, positions, liqPerCoin, fee, theme
   const fullRef = useRef(false);
   const sizeRef = useRef({ w: 0, h: 0 }); // 리사이즈 루프 차단용
   const paintedRef = useRef("");          // 마지막으로 그린 봉 구간의 지문
+  const dcRef = useRef(null);             // DrawingController
+  const coinRef = useRef(coin);           // 커밋 콜백이 옛 코인을 붙잡지 않게
+  const drawAllRef = useRef({});          // 커밋 시점의 직전 목록 (실행 취소용)
+  const stayRef = useRef(false);
+  const drawBusyRef = useRef(false);      // ESC 를 전체화면과 나눠 쓰기 위한 표시
 
   const cp = coin ? Number(livePrices?.[coin] || 0) : 0;
 
@@ -512,6 +535,122 @@ export default function PositionChart({ coins, positions, liqPerCoin, fee, theme
     try { window.localStorage.setItem(DASH_KEY, dashOpen ? "1" : "0"); } catch { /* 무시 */ }
   }, [dashOpen]);
 
+  /* ── 그리기 ─────────────────────────────────────
+     컨트롤러가 포인터·드래그를 직접 처리하고, 커밋 시점에만 여기로 올라온다.
+     드래그 중에 setState 하면 프레임마다 전체 트리가 다시 그려진다. */
+  const drawings = drawAll[coin] || NO_DRAWINGS;
+
+  const selectedDrawing = drawings.find((d) => d.id === selectedDid) || null;
+  const canUndo = (hist[coin] || NO_DRAWINGS).length > 0;
+
+  useEffect(() => { coinRef.current = coin; }, [coin]);
+  useEffect(() => { drawAllRef.current = drawAll; }, [drawAll]);
+  useEffect(() => { stayRef.current = stayDraw; }, [stayDraw]);
+  useEffect(() => { drawBusyRef.current = !!(tool || selectedDid); }, [tool, selectedDid]);
+
+  /* 되돌릴 목록을 쌓고 새 목록을 앉힌다. setState 갱신자 안에서 하면
+     StrictMode 에서 두 번 실행되므로 스택은 반드시 바깥에서 만든다. */
+  const applyDrawings = useCallback((next) => {
+    const c = coinRef.current;
+    const prev = drawAllRef.current[c] || NO_DRAWINGS;
+    const list = typeof next === "function" ? next(prev) : next;
+    if (list === prev) return;
+    setHist((h) => ({ ...h, [c]: [...(h[c] || []), prev].slice(-50) }));
+    setDrawAll((a) => ({ ...a, [c]: list }));
+  }, []);
+
+  const undo = useCallback(() => {
+    const c = coinRef.current;
+    setHist((h) => {
+      const stack = h[c] || [];
+      if (stack.length === 0) return h;
+      const prev = stack[stack.length - 1];
+      setDrawAll((a) => ({ ...a, [c]: prev }));
+      setSelectedDid(null);
+      return { ...h, [c]: stack.slice(0, -1) };
+    });
+  }, []);
+
+  useEffect(() => {
+    const chart = chartRef.current, series = seriesRef.current;
+    if (!chart || !series || !wrapRef.current) return;
+    const root = wrapRef.current.querySelector(".tv-lightweight-charts");
+    if (!root) return;
+    const dc = new DrawingController({
+      chart, series, root,
+      getCandles: () => candlesRef.current,
+      onCommit: (list) => applyDrawings(list),
+      onSelect: (id) => setSelectedDid(id),
+      onToolDone: () => { if (!stayRef.current) setTool(null); },
+    });
+    dcRef.current = dc;
+    return () => { dc.destroy(); dcRef.current = null; };
+  }, [chartReady, applyDrawings]);
+
+  useEffect(() => { dcRef.current?.setDrawings(drawings); }, [drawings, chartReady]);
+  useEffect(() => { dcRef.current?.setTool(tool); }, [tool, chartReady]);
+  useEffect(() => { dcRef.current?.setSelected(selectedDid); }, [selectedDid, chartReady]);
+  useEffect(() => { dcRef.current?.setMagnet(magnet); }, [magnet, chartReady]);
+  useEffect(() => { dcRef.current?.setLocked(drawLocked); }, [drawLocked, chartReady]);
+  useEffect(() => { dcRef.current?.setAllHidden(drawHidden); }, [drawHidden, chartReady]);
+
+  // 잠그면 그리던 것도 멈춘다
+  useEffect(() => { if (drawLocked) { setTool(null); setSelectedDid(null); } }, [drawLocked]);
+
+  // 코인을 바꾸면 그 코인의 선택은 의미가 없다
+  useEffect(() => { setSelectedDid(null); }, [coin]);
+
+  useEffect(() => {
+    try {
+      const o = JSON.parse(window.localStorage.getItem(DRAW_KEY) || "{}");
+      if (o && typeof o === "object" && !Array.isArray(o)) setDrawAll(o);
+    } catch { /* 무시 */ }
+  }, []);
+
+  /* 불러오기 전의 빈 값으로 덮어쓰면 저장된 그림이 통째로 날아간다.
+     {} 는 "아직 안 읽었다" 는 뜻일 뿐 저장할 값이 아니므로 아예 쓰지 않는다.
+     (실제로 Fast Refresh 로 state 만 리셋됐을 때 50개가 통째로 날아갔다.)
+     그림을 모두 지우면 {코인: []} 이라 {} 가 아니고 정상 저장된다. */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const s = JSON.stringify(drawAll);
+    if (s === "{}") return;
+    try { window.localStorage.setItem(DRAW_KEY, s); } catch { /* 무시 */ }
+  }, [drawAll]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
+      if (e.key === "Escape") {
+        if (!drawBusyRef.current) return;   // 그릴 게 없으면 전체화면 쪽에 넘긴다
+        dcRef.current?.cancel();
+        setTool(null); setSelectedDid(null);
+        return;
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedDid) {
+        e.preventDefault();
+        applyDrawings((list) => list.filter((d) => d.id !== selectedDid));
+        setSelectedDid(null);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && String(e.key).toLowerCase() === "z") {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      // Alt + T/H/J/V/C — TradingView 와 같은 배치
+      const sc = shortcutOf(e);
+      if (sc && !drawLocked) {
+        e.preventDefault();
+        setTool((t) => (t === sc ? null : sc));
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [selectedDid, drawLocked, applyDrawings, undo]);
+
   /* ── 지표: 시리즈·창·마커·캔들색·표 반영 ─────────── */
   useEffect(() => {
     const chart = chartRef.current, lib = libRef.current;
@@ -708,7 +847,8 @@ export default function PositionChart({ coins, positions, liqPerCoin, fee, theme
     // 네이티브 전체화면을 브라우저 쪽에서(ESC·F11) 빠져나가면 오버레이도 같이 닫는다
     const onFsChange = () => { if (!document.fullscreenElement) setIsFull(false); };
     // 네이티브가 없는 환경(iOS Safari)에서도 ESC 로 닫히게 한다
-    const onKey = (e) => { if (e.key === "Escape") exitFull(); };
+    // 그리는 중이면 ESC 는 그리기 취소가 먼저다. 전체화면까지 같이 닫히면 안 된다.
+    const onKey = (e) => { if (e.key === "Escape" && !drawBusyRef.current) exitFull(); };
     document.addEventListener("fullscreenchange", onFsChange);
     if (isFull) document.addEventListener("keydown", onKey);
     return () => {
@@ -857,9 +997,29 @@ export default function PositionChart({ coins, positions, liqPerCoin, fee, theme
       }}>
         <div ref={wrapRef} style={{ width: "100%", height: isFull ? "100%" : totalH }} />
 
+        {/* 그리기 툴바 — 왼쪽 세로 레일. 범례·설정 패널은 이 폭만큼 밀린다. */}
+        <DrawToolbar
+          tool={tool} onTool={setTool}
+          magnet={magnet} onMagnet={setMagnet}
+          stay={stayDraw} onStay={setStayDraw}
+          locked={drawLocked} onLocked={setDrawLocked}
+          hidden={drawHidden} onHidden={setDrawHidden}
+          count={drawings.length}
+          onClearAll={() => { applyDrawings(NO_DRAWINGS); setSelectedDid(null); }}
+          canUndo={canUndo} onUndo={undo}
+          selected={selectedDrawing}
+          selectedDef={selectedDrawing ? drawById(selectedDrawing.tool) : null}
+          onStyle={(k, v) => applyDrawings((list) =>
+            list.map((d) => (d.id === selectedDid ? { ...d, style: { ...d.style, [k]: v } } : d)))}
+          onDeleteSelected={() => {
+            applyDrawings((list) => list.filter((d) => d.id !== selectedDid));
+            setSelectedDid(null);
+          }}
+        />
+
         {/* 범례 — 적용된 지표 인스턴스 */}
         {instances.length > 0 && (
-          <div style={{ position: "absolute", top: 6, left: 8, zIndex: 3, display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-start" }}>
+          <div style={{ position: "absolute", top: 6, left: 8 + TOOLBAR_W, zIndex: 3, display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-start" }}>
             {instances.map((inst) => {
               const def = byId(inst.id);
               if (!def) return null;
@@ -946,7 +1106,7 @@ export default function PositionChart({ coins, positions, liqPerCoin, fee, theme
         {/* 지표 설정 */}
         {settingInst && settingDef && (
           <div style={{
-            position: "absolute", top: 6, left: 200, zIndex: 21, width: 230,
+            position: "absolute", top: 6, left: 200 + TOOLBAR_W, zIndex: 21, width: 230,
             maxHeight: "calc(100% - 24px)", overflowY: "auto",
             background: "var(--bg-card)", border: "1px solid #0ea5e944", borderRadius: 8,
             boxShadow: "0 8px 24px #0008", padding: 10,
