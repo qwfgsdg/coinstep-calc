@@ -3411,15 +3411,15 @@ export default function SimV4() {
                       const currentRatio = n(reduceRatios[pos.id] || 0);
                       const detail = calc.reduceResult?.details?.find(d => d.id === pos.id);
                       return (
-                        <div key={pos.id} style={{ display: "grid", gridTemplateColumns: "90px 1fr 60px 100px", gap: 8, alignItems: "center", padding: "8px 10px", borderRadius: 8, background: currentRatio > 0 ? "#f8717108" : "var(--bg-panel)", border: `1px solid ${currentRatio > 0 ? "#f8717122" : "var(--border)"}`, marginBottom: 4 }}>
+                        <div key={pos.id} style={{ display: "grid", gridTemplateColumns: "90px 1fr 72px 100px", gap: 8, alignItems: "center", padding: "8px 10px", borderRadius: 8, background: currentRatio > 0 ? "#f8717108" : "var(--bg-panel)", border: `1px solid ${currentRatio > 0 ? "#f8717122" : "var(--border)"}`, marginBottom: 4 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                             <span style={{ fontWeight: 700, color: "var(--text-bright)", fontSize: 12 }}>{pos.coin}</span>
                             <span style={{ fontSize: 9, color: pos.dir === "long" ? "#34d399" : "#f87171" }}>{pos.dir === "long" ? "롱" : "숏"}</span>
                           </div>
                           <div>
                             <div style={{ display: "flex", gap: 3 }}>
-                              {[0, 25, 50, 75, 100].map(v => (
-                                <button key={v} onClick={() => setReduceRatios(prev => ({ ...prev, [pos.id]: String(v) }))} style={{
+                              {[0, 5, 10, 25, 50, 100].map(v => (
+                                <button key={v} onClick={() => setReduceRatios(prev => ({ ...prev, [pos.id]: v === 0 ? "" : String(v) }))} style={{
                                   flex: 1, padding: "4px 0", fontSize: 9, fontWeight: 600, borderRadius: 4,
                                   cursor: "pointer", fontFamily: "'DM Sans'",
                                   border: `1px solid ${currentRatio === v ? "#f8717166" : "var(--border)"}`,
@@ -3429,8 +3429,27 @@ export default function SimV4() {
                               ))}
                             </div>
                           </div>
-                          <div style={{ textAlign: "center", color: currentRatio > 0 ? "#f87171" : "var(--text-dim)", fontWeight: 700, fontSize: 13 }}>
-                            {currentRatio > 0 ? `${currentRatio}%` : "—"}
+                          {/* 프리셋에 없는 비율(7.5% 같은)을 직접 넣는다. 버튼과 같은 값을 쓰므로
+                              타이핑하면 해당 프리셋에 자동으로 불이 들어오고, 비우면 "유지"가 된다. */}
+                          <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+                            <input type="number" min="0" max="100" step="any" placeholder="0"
+                              value={reduceRatios[pos.id] || ""}
+                              onChange={(e) => setReduceRatios(prev => ({ ...prev, [pos.id]: e.target.value }))}
+                              onBlur={(e) => {
+                                // 타이핑 중에 막으면 100 을 치는 동안 1 → 10 에서 걸린다. 뗄 때만 정리한다.
+                                const raw = e.target.value;
+                                if (raw === "") return;
+                                const c = Math.min(100, Math.max(0, Number(raw) || 0));
+                                setReduceRatios(prev => ({ ...prev, [pos.id]: c === 0 ? "" : String(c) }));
+                              }}
+                              style={{
+                                width: "100%", padding: "5px 16px 5px 6px", textAlign: "right",
+                                background: "var(--bg-input)", borderRadius: 5, outline: "none",
+                                border: `1px solid ${currentRatio > 0 ? "#f8717144" : "var(--border)"}`,
+                                color: currentRatio > 0 ? "#f87171" : "var(--text-muted)",
+                                fontWeight: 700, fontSize: 12, fontFamily: "'IBM Plex Mono'",
+                              }} />
+                            <span style={{ position: "absolute", right: 5, fontSize: 10, pointerEvents: "none", color: currentRatio > 0 ? "#f87171" : "var(--text-dim)" }}>%</span>
                           </div>
                           <div style={{ textAlign: "right" }}>
                             {detail ? (
